@@ -6,6 +6,7 @@ from typing import Optional
 import click
 
 from deepwrap import Client
+from deepwrap.config import PROJECT_VERSION
 from deepwrap.core import Auth
 from deepwrap.interfaces.cli import main as interactive_main
 from deepwrap.utils.bearer_token_extractor import BearerTokenExtractor
@@ -13,7 +14,6 @@ from deepwrap.utils.config_store import ConfigStore
 
 
 APP_NAME = "deepwrap"
-VERSION = "0.1.0"
 SUPPORTED_MODELS = ("expert", "default", "vision")
 
 
@@ -82,7 +82,7 @@ def echo_error(message: str) -> None:
         "help_option_names": ["-h", "--help"],
     },
 )
-@click.version_option(version=VERSION, prog_name=APP_NAME)
+@click.version_option(version=PROJECT_VERSION, prog_name=APP_NAME)
 @click.pass_context
 def cli(ctx: click.Context) -> None:
     """
@@ -193,24 +193,6 @@ def auth_command(
 
     except Exception as exc:
         raise DeepWrapCLIError(f"Authentication failed: {exc}") from exc
-
-
-@cli.command("logout")
-def logout_command() -> None:
-    """
-    Remove the saved DeepWrap token from local config.
-    """
-
-    try:
-        store = ConfigStore()
-        config = store.load()
-        config.token = None
-        store.save(config)
-
-        echo_success(f"Logged out. Token removed from: {store.path}")
-
-    except Exception as exc:
-        raise DeepWrapCLIError(f"Logout failed: {exc}") from exc
 
 
 @cli.command("api")

@@ -3,6 +3,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+PROJECT_VERSION = "0.1.3"
+
 @dataclass(frozen=True)
 class Settings:
     base_url: str             = os.getenv("DEEPSEEK_BASE_URL", "https://chat.deepseek.com")

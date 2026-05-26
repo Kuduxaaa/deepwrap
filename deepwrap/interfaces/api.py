@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from deepwrap import Client
 from deepwrap.utils.config_store import ConfigStore
+from deepwrap.config import PROJECT_VERSION
 
 
 ModelName = Literal["expert", "default", "vision"]
@@ -242,7 +243,7 @@ def format_sse_chunk(chunk: str) -> str:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="DeepWrap API",
-        version="0.1.0",
+        version=PROJECT_VERSION,
         description="Local HTTP API for DeepWrap.",
     )
 
@@ -255,7 +256,7 @@ def create_app() -> FastAPI:
         return HealthResponse(
             ok=True,
             app="deepwrap",
-            version="0.1.0",
+            version=PROJECT_VERSION,
             token_configured=bool(config.token),
             cached_clients=state.cached_clients_count,
             active_sessions=state.active_sessions_count,
