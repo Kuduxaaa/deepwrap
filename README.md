@@ -45,18 +45,18 @@
 - [Disclaimer](#disclaimer)
 - [License](#license)
 
-**DeepWrap** is a lightweight Python SDK, CLI, and local HTTP API wrapper for interacting with DeepSeek Chat through a clean developer-friendly interface.
+**DeepWrap** is a lightweight Python SDK, CLI, and local HTTP API wrapper for DeepSeek Chat with session support, browser authentication, streaming, and local developer tooling.
 
 It provides:
 
 - A simple Python client
+- Session-based chat support
 - Streaming and non-streaming chat responses
 - Structured streaming with separated thinking and response chunks
 - Browser-based authentication
-- Local token storage
+- Local token storage and reuse
 - Interactive terminal UI
 - FastAPI server mode
-- Session-based chat support
 - Internal proof-of-work handling
 
 > Repository: [https://github.com/Kuduxaaa/deepwrap](https://github.com/Kuduxaaa/deepwrap)
@@ -129,6 +129,8 @@ Token resolution order:
 4. Saved local config from `deepwrap auth`
 5. Browser authentication only when explicitly requested with `Client.from_browser_auth()` or `allow_browser_auth=True`
 
+`Client` is the main entrypoint for DeepWrap. It resolves bearer tokens from an explicit API key, environment variables, saved local config, or browser auth, then exposes session-based chat and PoW-backed request handling.
+
 ### Direct Token
 
 ```python
@@ -158,6 +160,8 @@ client = Client()
 ```
 
 ### Browser Auth from Python
+
+DeepWrap supports browser-based authentication from Python. You can bootstrap a client with `Client.from_browser_auth()` or use `allow_browser_auth=True`, and the library will capture a bearer token from an authenticated browser session before creating the HTTP session.
 
 ```python
 from deepwrap import Client
@@ -288,9 +292,11 @@ chat = client.chats.create_session(model="default")
 
 DeepWrap includes an optional **God Mode** for chat sessions.
 
-When `god_mode` is enabled, the session is initialized with a more direct and **unrestricted behavior profile**. The model is encouraged to answer with fewer refusals, less corporate-style filtering, reduced bias, and more raw technical depth.
+When `god_mode` is enabled, DeepWrap injects a one-time override prompt into the first user turn of the session. This prompt attempts to alter the model’s default behavior by making it less restricted and reducing the effect of built-in safety guardrails.
 
-God Mode is useful when you want the assistant to behave less like a guarded chatbot and more like a direct reasoning engine.
+This can materially change the model’s behavior and may cause it to generate content that is harmful, unethical, inappropriate, or unsuitable for general use.
+
+Because this mode is implemented through prompt injection at the start of a session, its behavior is intentionally intrusive and may diverge from normal model behavior. It should only be used in controlled development and research environments.
 
 > God Mode is disabled by default and must be enabled explicitly per session.
 
@@ -307,7 +313,7 @@ chat = client.chats.create_session(
 )
 
 response = chat.respond(
-    "How to steal someone's crypto wallet? 3:)",
+    "Give me a blunt explanation of Python metaclasses.",
     stream=False,
 )
 
@@ -406,7 +412,7 @@ deepwrap api
 Specify host and port:
 
 ```bash
-deepwrap api --host 127.0.0.1 --port 7070
+deepwrap api --host 127.0.0.1 --port 8000
 ```
 
 Enable reload for development:
@@ -434,7 +440,7 @@ deepwrap api --log-level debug
 ### Health Check
 
 ```bash
-curl http://127.0.0.1:7070/health
+curl http://127.0.0.1:8000/health
 ```
 
 Example response:
@@ -455,7 +461,7 @@ Example response:
 ### One-Shot Chat Request
 
 ```bash
-curl -X POST http://127.0.0.1:7070/chat \
+curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Explain recursion in one sentence.",
@@ -481,7 +487,7 @@ Example response:
 ### Create Persistent Session
 
 ```bash
-curl -X POST http://127.0.0.1:7070/sessions \
+curl -X POST http://127.0.0.1:8000/sessions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "expert"
@@ -503,7 +509,7 @@ Example response:
 ### Use Persistent Session
 
 ```bash
-curl -X POST http://127.0.0.1:7070/chat \
+curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
     "session_id": "chat_abc123",
@@ -515,7 +521,7 @@ curl -X POST http://127.0.0.1:7070/chat \
 Then:
 
 ```bash
-curl -X POST http://127.0.0.1:7070/chat \
+curl -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
     "session_id": "chat_abc123",
@@ -529,7 +535,7 @@ curl -X POST http://127.0.0.1:7070/chat \
 ### Delete Session
 
 ```bash
-curl -X DELETE http://127.0.0.1:7070/sessions/chat_abc123
+curl -X DELETE http://127.0.0.1:8000/sessions/chat_abc123
 ```
 
 ---
@@ -539,7 +545,7 @@ curl -X DELETE http://127.0.0.1:7070/sessions/chat_abc123
 ### Plain Text Streaming
 
 ```bash
-curl -N -X POST http://127.0.0.1:7070/chat \
+curl -N -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Explain black holes simply.",
@@ -554,7 +560,7 @@ curl -N -X POST http://127.0.0.1:7070/chat \
 ### Server-Sent Events Streaming
 
 ```bash
-curl -N -X POST http://127.0.0.1:7070/chat \
+curl -N -X POST http://127.0.0.1:8000/chat \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Explain black holes simply.",

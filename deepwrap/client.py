@@ -14,7 +14,6 @@ class Client:
     Public DeepWrap client.
 
     This is the main user-facing entrypoint. It exposes:
-        - responses: high-level OpenAI-style API
         - chats:     low-level chat session API
         - pow:       low-level proof-of-work API
 
