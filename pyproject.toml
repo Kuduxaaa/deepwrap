@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deepwrap"
+version = "0.1.0"
+description = "Python SDK, CLI, and local FastAPI wrapper for DeepSeek Chat."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+authors = [
+    { name = "Nika Kudukhashvili", email = "nikakuduxashvili0@gmail.com" }
+]
+
+maintainers = [
+    { name = "Nika Kudukhashvili", email = "nikakuduxashvili0@gmail.com" }
+]
+
+keywords = [
+    "deepseek",
+    "chat",
+    "ai",
+    "sdk",
+    "cli",
+    "fastapi",
+    "wrapper",
+    "streaming",
+    "llm"
+]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed"
+]
+
+dependencies = [
+    "requests>=2.31.0",
+    "websocket-client>=1.7.0",
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0",
+    "pydantic>=2.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.0.0",
+    "twine>=5.0.0",
+    "pytest>=8.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.8.0"
+]
+
+api = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.27.0"
+]
+
+cli = [
+    "click>=8.1.0",
+    "rich>=13.0.0",
+    "prompt_toolkit>=3.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/Kuduxaaa/deepwrap"
+Repository = "https://github.com/Kuduxaaa/deepwrap"
+Issues = "https://github.com/Kuduxaaa/deepwrap/issues"
+Documentation = "https://github.com/Kuduxaaa/deepwrap#readme"
+
+[project.scripts]
+deepwrap = "deepwrap.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["deepwrap*"]
+
+[tool.setuptools.package-data]
+deepwrap = ["py.typed"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

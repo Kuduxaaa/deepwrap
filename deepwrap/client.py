@@ -1,0 +1,136 @@
+import os
+import uuid
+
+from typing import Optional
+
+from deepwrap.core import SessionManager
+from deepwrap.api import ChatsAPI, PowAPI
+from deepwrap.api.chat_session import ChatSession
+
+
+class Client:
+    """
+    Public DeepWrap client.
+
+    This is the main user-facing entrypoint. It exposes:
+        - responses: high-level OpenAI-style API
+        - chats:     low-level chat session API
+        - pow:       low-level proof-of-work API
+
+    If `api_key` is omitted, the client attempts to load it from:
+        - DEEPWRAP_API_KEY
+        - DEEPSEEK_API_KEY
+    """
+
+    def __init__(self, api_key: Optional[str] = None) -> None:
+        """
+        Initialize the public client.
+
+        Args:
+            api_key:
+                Optional bearer token. If omitted, the token is loaded from the
+                environment.
+        """
+
+        bearer_token = (
+            api_key
+            or os.getenv("DEEPWRAP_API_KEY")
+            or os.getenv("DEEPSEEK_API_KEY")
+        )
+
+        if not bearer_token:
+            raise ValueError(
+                "Missing API key. Pass api_key=... or set DEEPWRAP_API_KEY."
+            )
+
+        self.session       = SessionManager(bearer_token = bearer_token)
+        self.pow           = PowAPI(self)
+        self.chats         = ChatsAPI(self)
+
+        self._conversations: dict[str, ChatSession] = {}
+        self._responses: dict[str, str]             = {}
+
+    def _create_conversation(self, model: str) -> tuple[str, ChatSession]:
+        """
+        Create and register a new conversation.
+
+        Args:
+            model:
+                The model to bind to the newly created chat session.
+
+        Returns:
+            A tuple of `(conversation_id, chat_session)`.
+        """
+
+        conversation_id = f"conv_{uuid.uuid4().hex}"
+        chat            = self.chats.create_session(model = model)
+
+        self._conversations[conversation_id] = chat
+
+        return conversation_id, chat
+
+    def _resolve_conversation(
+        self,
+        model: str,
+        conversation_id: Optional[str] = None,
+        previous_response_id: Optional[str] = None,
+    ) -> tuple[str, ChatSession]:
+        """
+        Resolve or create the chat session used for a response request.
+
+        Args:
+            model:
+                The requested model.
+
+            conversation_id:
+                Optional explicit conversation identifier.
+
+            previous_response_id:
+                Optional previously returned response ID. If provided, the
+                conversation linked to that response is reused.
+
+        Returns:
+            A tuple of `(conversation_id, chat_session)`.
+
+        Raises:
+            ValueError:
+                If an unknown conversation or response ID is provided.
+        """
+
+        if previous_response_id is not None:
+            conversation_id = self._responses.get(previous_response_id)
+
+            if conversation_id is None:
+                raise ValueError(
+                    f"Unknown previous_response_id: {previous_response_id}"
+                )
+
+        if conversation_id is not None:
+            chat = self._conversations.get(conversation_id)
+
+            if chat is None:
+                raise ValueError(f"Unknown conversation_id: {conversation_id}")
+
+            if chat.model_type != model:
+                raise ValueError(
+                    "Model mismatch for existing conversation. "
+                    f"Expected '{chat.model_type}', got '{model}'."
+                )
+
+            return conversation_id, chat
+
+        return self._create_conversation(model)
+
+    def _register_response(self, response_id: str, conversation_id: str) -> None:
+        """
+        Register a response ID under a conversation ID.
+
+        Args:
+            response_id:
+                The locally generated response identifier.
+
+            conversation_id:
+                The conversation the response belongs to.
+        """
+
+        self._responses[response_id] = conversation_id
