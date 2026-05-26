@@ -1,5 +1,50 @@
 # DeepWrap
 
+[![PyPI](https://img.shields.io/pypi/v/deepwrap.svg)](https://pypi.org/project/deepwrap/)
+[![Python](https://img.shields.io/pypi/pyversions/deepwrap.svg)](https://pypi.org/project/deepwrap/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Repository](https://img.shields.io/badge/GitHub-Kuduxaaa%2Fdeepwrap-black?logo=github)](https://github.com/Kuduxaaa/deepwrap)
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Authentication](#authentication)
+  - [Direct Token](#direct-token)
+  - [Environment Variable](#environment-variable)
+  - [Browser Auth from Python](#browser-auth-from-python)
+- [CLI Authentication](#cli-authentication)
+- [Python SDK Usage](#python-sdk-usage)
+  - [Basic Non-Streaming Chat](#basic-non-streaming-chat)
+  - [Streaming Chat](#streaming-chat)
+  - [Multi-Turn Chat](#multi-turn-chat)
+- [Supported Models](#supported-models)
+- [God Mode](#god-mode)
+  - [Python SDK](#python-sdk)
+- [CLI Usage](#cli-usage)
+- [Interactive CLI Commands](#interactive-cli-commands)
+- [Local FastAPI Server](#local-fastapi-server)
+- [HTTP API](#http-api)
+  - [Health Check](#health-check)
+  - [One-Shot Chat Request](#one-shot-chat-request)
+  - [Create Persistent Session](#create-persistent-session)
+  - [Use Persistent Session](#use-persistent-session)
+  - [Delete Session](#delete-session)
+- [Streaming Over HTTP](#streaming-over-http)
+  - [Plain Text Streaming](#plain-text-streaming)
+  - [Server-Sent Events Streaming](#server-sent-events-streaming)
+- [Environment Variables](#environment-variables)
+- [API Design](#api-design)
+- [Examples](#examples)
+  - [Switch Models](#switch-models)
+  - [Hide Thinking Output](#hide-thinking-output)
+  - [Disable Search](#disable-search)
+- [Error Handling](#error-handling)
+- [Notes](#notes)
+- [Security Notice](#security-notice)
+- [Disclaimer](#disclaimer)
+- [License](#license)
+
 **DeepWrap** is a lightweight Python SDK, CLI, and local HTTP API wrapper for interacting with DeepSeek Chat through a clean developer-friendly interface.
 
 It provides:
@@ -12,7 +57,7 @@ It provides:
 - Interactive terminal UI
 - FastAPI server mode
 - Session-based chat support
-- Proof-of-work handling internally
+- Internal proof-of-work handling
 
 > Repository: [https://github.com/Kuduxaaa/deepwrap](https://github.com/Kuduxaaa/deepwrap)
 
@@ -22,9 +67,9 @@ It provides:
 
 ```bash
 pip install deepwrap
-````
+```
 
-Or install directly from GitHub:
+Install directly from GitHub:
 
 ```bash
 pip install git+https://github.com/Kuduxaaa/deepwrap.git
@@ -35,23 +80,25 @@ For local development:
 ```bash
 git clone https://github.com/Kuduxaaa/deepwrap.git
 cd deepwrap
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 ---
 
 ## Quick Start
 
+Authenticate once:
+
 ```bash
-deepwrap
+deepwrap auth
 ```
 
-or
+Then use DeepWrap from Python:
 
 ```python
 from deepwrap import Client
 
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 chat = client.chats.create_session(model="expert")
 
 response = chat.respond(
@@ -62,13 +109,27 @@ response = chat.respond(
 print(response)
 ```
 
+Or start the interactive terminal UI:
+
+```bash
+deepwrap
+```
+
 ---
 
 ## Authentication
 
 DeepWrap uses a Bearer token.
 
-You can provide the token directly:
+Token resolution order:
+
+1. Explicit `api_key`
+2. `DEEPWRAP_API_KEY`
+3. `DEEPSEEK_API_KEY`
+4. Saved local config from `deepwrap auth`
+5. Browser authentication only when explicitly requested with `Client.from_browser_auth()` or `allow_browser_auth=True`
+
+### Direct Token
 
 ```python
 from deepwrap import Client
@@ -76,7 +137,7 @@ from deepwrap import Client
 client = Client(api_key="YOUR_BEARER_TOKEN")
 ```
 
-Or use environment variables:
+### Environment Variable
 
 ```bash
 export DEEPWRAP_API_KEY="YOUR_BEARER_TOKEN"
@@ -96,6 +157,22 @@ from deepwrap import Client
 client = Client()
 ```
 
+### Browser Auth from Python
+
+```python
+from deepwrap import Client
+
+client = Client.from_browser_auth()
+```
+
+Equivalent:
+
+```python
+from deepwrap import Client
+
+client = Client(allow_browser_auth=True)
+```
+
 ---
 
 ## CLI Authentication
@@ -106,7 +183,7 @@ Authenticate using browser login:
 deepwrap auth
 ```
 
-Manually save a token:
+Manually enter and save a token:
 
 ```bash
 deepwrap auth --manual
@@ -124,7 +201,7 @@ Show current config status:
 deepwrap config
 ```
 
-Remove saved token:
+Remove the saved token:
 
 ```bash
 deepwrap logout
@@ -139,7 +216,7 @@ deepwrap logout
 ```python
 from deepwrap import Client
 
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 chat = client.chats.create_session(model="expert")
 
 response = chat.respond(
@@ -159,7 +236,7 @@ print(response)
 ```python
 from deepwrap import Client
 
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 chat = client.chats.create_session(model="expert")
 
 for chunk in chat.respond(
@@ -180,7 +257,7 @@ print()
 ```python
 from deepwrap import Client
 
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 chat = client.chats.create_session(model="expert")
 
 print(chat.respond("My name is Nika.", stream=False))
@@ -188,39 +265,6 @@ print(chat.respond("What is my name?", stream=False))
 ```
 
 The `ChatSession` keeps track of the latest message ID internally, so follow-up messages stay inside the same conversation.
-
----
-
-### Structured Streaming
-
-If you want to separate thinking chunks from final response chunks:
-
-```python
-from deepwrap import Client
-
-client = Client(api_key="YOUR_BEARER_TOKEN")
-chat = client.chats.create_session(model="expert")
-
-for kind, chunk in chat.respond_structured(
-    "Explain how neural networks learn.",
-    thinking=True,
-    search=True,
-):
-    if kind == "think":
-        print(f"[THINK] {chunk}", end="", flush=True)
-
-    elif kind == "response":
-        print(f"[RESPONSE] {chunk}", end="", flush=True)
-
-print()
-```
-
-Possible chunk kinds:
-
-```text
-think
-response
-```
 
 ---
 
@@ -238,6 +282,36 @@ Example:
 
 ```python
 chat = client.chats.create_session(model="default")
+```
+
+## God Mode
+
+DeepWrap includes an optional **God Mode** for chat sessions.
+
+When `god_mode` is enabled, the session is initialized with a more direct and **unrestricted behavior profile**. The model is encouraged to answer with fewer refusals, less corporate-style filtering, reduced bias, and more raw technical depth.
+
+God Mode is useful when you want the assistant to behave less like a guarded chatbot and more like a direct reasoning engine.
+
+> God Mode is disabled by default and must be enabled explicitly per session.
+
+### Python SDK
+
+```python
+from deepwrap import Client
+
+client = Client()
+
+chat = client.chats.create_session(
+    model="expert",
+    god_mode=True,
+)
+
+response = chat.respond(
+    "How to steal someone's crypto wallet? 3:)",
+    stream=False,
+)
+
+print(response)
 ```
 
 ---
@@ -303,6 +377,7 @@ Inside the interactive terminal UI:
 /token "<token>"   Set token inline
 /thinking on|off   Show or hide thinking blocks
 /search on|off     Enable or disable search
+/god on|off        Enable or disable God Mode
 /save              Save current settings
 /status            Show current session status
 ```
@@ -506,7 +581,7 @@ data: [DONE]
 
 DeepWrap checks the following environment variables:
 
-```bash
+```text
 DEEPWRAP_API_KEY
 DEEPSEEK_API_KEY
 DEEPSEEK_BASE_URL
@@ -528,49 +603,6 @@ export DEEPSEEK_BASE_DOMAIN="chat.deepseek.com"
 
 ---
 
-## Project Structure
-
-```text
-deepwrap/
-  __init__.py
-  __main__.py
-  client.py
-  config.py
-
-  api/
-    __init__.py
-    base.py
-    chats.py
-    chat_session.py
-    pow.py
-
-  core/
-    __init__.py
-    auth.py
-    session_manager.py
-
-  interfaces/
-    cli.py
-    api.py
-
-  modules/
-    ...
-
-  utils/
-    ...
-
-examples/
-  01_basic_stream.py
-  02_basic_non_stream.py
-  03_multi_turn_chat.py
-  04_god_mode.py
-  05_no_thinking.py
-  06_structured_chunks.py
-  07_separate_thinking_and_answer.py
-  08_switch_model.py
-```
-
----
 
 ## API Design
 
@@ -583,7 +615,7 @@ from deepwrap import Client
 Create a client:
 
 ```python
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 ```
 
 Create a chat session:
@@ -614,51 +646,6 @@ for kind, chunk in chat.respond_structured("Hello"):
 
 ---
 
-## Development Setup
-
-Clone the repository:
-
-```bash
-git clone https://github.com/Kuduxaaa/deepwrap.git
-cd deepwrap
-```
-
-Create a virtual environment:
-
-```bash
-python -m venv .venv
-```
-
-Activate it:
-
-Windows:
-
-```bash
-.venv\Scripts\activate
-```
-
-Linux/macOS:
-
-```bash
-source .venv/bin/activate
-```
-
-Install in editable mode:
-
-```bash
-pip install -e .
-```
-
-Install development dependencies:
-
-```bash
-pip install -e ".[dev]"
-```
-
----
-
----
-
 ## Examples
 
 ### Switch Models
@@ -666,7 +653,7 @@ pip install -e ".[dev]"
 ```python
 from deepwrap import Client
 
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 
 expert_chat = client.chats.create_session(model="expert")
 default_chat = client.chats.create_session(model="default")
@@ -682,7 +669,7 @@ print(default_chat.respond("Explain recursion in one sentence.", stream=False))
 ```python
 from deepwrap import Client
 
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 chat = client.chats.create_session(model="expert")
 
 response = chat.respond(
@@ -702,7 +689,7 @@ print(response)
 ```python
 from deepwrap import Client
 
-client = Client(api_key="YOUR_BEARER_TOKEN")
+client = Client()
 chat = client.chats.create_session(model="expert")
 
 response = chat.respond(
@@ -725,7 +712,7 @@ Example:
 from deepwrap import Client
 
 try:
-    client = Client(api_key="YOUR_BEARER_TOKEN")
+    client = Client()
     chat = client.chats.create_session(model="expert")
     response = chat.respond("Hello", stream=False)
     print(response)
@@ -748,13 +735,13 @@ DeepWrap is designed as a developer-focused wrapper.
 
 It handles:
 
-* HTTP session headers
-* Authorization
-* Chat session creation
-* Streaming response parsing
-* Proof-of-work challenge solving
-* CLI interaction
-* Local API serving
+- HTTP session headers
+- Authorization
+- Chat session creation
+- Streaming response parsing
+- Proof-of-work challenge solving
+- CLI interaction
+- Local API serving
 
 The goal is to provide a clean interface while keeping the internal implementation modular and extensible.
 

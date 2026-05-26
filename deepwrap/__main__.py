@@ -8,6 +8,7 @@ import click
 from deepwrap import Client
 from deepwrap.core import Auth
 from deepwrap.interfaces.cli import main as interactive_main
+from deepwrap.utils.bearer_token_extractor import BearerTokenExtractor
 from deepwrap.utils.config_store import ConfigStore
 
 
@@ -22,25 +23,6 @@ class DeepWrapCLIError(click.ClickException):
     """
 
 
-def normalize_token(token: str) -> str:
-    """
-    Normalize a raw token or Authorization header value.
-
-    Accepts:
-        - raw_token
-        - Bearer raw_token
-    """
-
-    token = token.strip()
-
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-
-    if not token:
-        raise DeepWrapCLIError("Token cannot be empty.")
-
-    return token
-
 
 def load_saved_token() -> Optional[str]:
     """
@@ -52,7 +34,7 @@ def load_saved_token() -> Optional[str]:
     if not config.token:
         return None
 
-    return normalize_token(config.token)
+    return BearerTokenExtractor.normalize_token(config.token)
 
 
 def save_token(token: str) -> None:
@@ -61,7 +43,7 @@ def save_token(token: str) -> None:
     """
 
     store = ConfigStore()
-    store.update_token(normalize_token(token))
+    store.update_token(BearerTokenExtractor.normalize_token(token))
 
 
 def resolve_token(explicit_token: Optional[str] = None) -> str:
@@ -70,7 +52,7 @@ def resolve_token(explicit_token: Optional[str] = None) -> str:
     """
 
     if explicit_token:
-        return normalize_token(explicit_token)
+        return BearerTokenExtractor.normalize_token(explicit_token)
 
     token = load_saved_token()
 
@@ -168,7 +150,7 @@ def auth_command(
         captured_token: Optional[str] = None
 
         if token:
-            captured_token = normalize_token(token)
+            captured_token = BearerTokenExtractor.normalize_token(token)
 
         elif manual:
             entered = click.prompt(
@@ -178,14 +160,14 @@ def auth_command(
                 type=str,
             )
 
-            captured_token = normalize_token(entered)
+            captured_token = BearerTokenExtractor.normalize_token(entered)
 
         else:
             click.echo("Starting browser authentication...")
             captured_token = Auth().browser(timeout=timeout)
 
             if captured_token:
-                captured_token = normalize_token(captured_token)
+                captured_token = BearerTokenExtractor.normalize_token(captured_token)
 
         if not captured_token:
             raise DeepWrapCLIError(

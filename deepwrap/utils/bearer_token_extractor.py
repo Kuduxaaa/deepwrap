@@ -54,3 +54,29 @@ class BearerTokenExtractor:
             return cls.from_headers(params.get("headers", {}))
 
         return None
+
+
+    @staticmethod
+    def normalize_token(token: str) -> str:
+        """
+        Normalize a bearer token by stripping whitespace and removing the "Bearer " prefix if present.
+
+        Args:
+            token: The raw bearer token string.
+        
+        Returns: 
+            The normalized bearer token.
+        
+        Raises: 
+            ValueError if the token is empty after normalization.
+        """
+
+        token = token.strip()
+
+        if token.lower().startswith("bearer "):
+            token = token[7:].strip()
+
+        if not token:
+            raise ValueError("API key cannot be empty.")
+
+        return token
