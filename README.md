@@ -694,7 +694,7 @@ Example response:
 {
   "ok": true,
   "app": "deepwrap",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "token_configured": true,
   "cached_clients": 1,
   "active_sessions": 0

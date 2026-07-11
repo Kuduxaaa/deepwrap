@@ -48,6 +48,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The tool-call decision buffer now tolerates longer model narration without
   leaking raw tool envelopes into CLI output.
 
+## [0.2.3] - 2026-07-11
+
+### Added
+
+- Long-term memory query to fetch and inject the last 20 memories with an importance score of 0.9 or greater on the initial session load.
+- Unit tests covering priority memory loading, SQLite count checks, and client-level context integration.
+
+### Changed
+
+- Compressed thinking panel card layout in the CLI by removing all vertical/horizontal extra margin padding (`padding=(0, 0)`).
+
 ## [0.2.2] - 2026-07-11
 
 ### Added
@@ -96,6 +107,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Documentation now covers vision uploads, model search behavior, and function
   calling.
 
+[0.2.3]: https://github.com/Kuduxaaa/deepwrap/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/Kuduxaaa/deepwrap/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Kuduxaaa/deepwrap/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Kuduxaaa/deepwrap/compare/v0.1.3...v0.2.0
