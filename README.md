@@ -272,6 +272,66 @@ The `ChatSession` keeps track of the latest message ID internally, so follow-up 
 
 ---
 
+### Vision file uploads
+
+Files can be attached only to a `vision` session. DeepWrap uploads the file,
+waits for DeepSeek to process it, and forwards its file ID with the prompt.
+
+```python
+chat = client.chats.create_session(model="vision")
+
+response = chat.respond(
+    "Describe this image.",
+    files=["./photo.png"],
+    stream=False,
+)
+```
+
+You can also upload once and reuse the returned ID:
+
+```python
+uploaded = chat.upload_file("./photo.png")
+response = chat.respond("What is visible?", file_ids=[uploaded.id], stream=False)
+```
+
+### Pseudo function calling
+
+DeepWrap supplies tool definitions through a synthetic system protocol. The model
+either answers normally or returns a strict `<deepwrap_tool_call>` JSON envelope.
+Passing `functions` enables the automatic tool/result loop; omitting it returns the
+parsed call for execution by the application.
+
+```python
+from deepwrap import Tool
+
+add = Tool(
+    name="add",
+    description="Add two integers.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "a": {"type": "integer"},
+            "b": {"type": "integer"},
+        },
+        "required": ["a", "b"],
+    },
+)
+
+result = chat.respond_with_tools(
+    "What is 20 + 22?",
+    [add],
+    functions={"add": lambda a, b: a + b},
+)
+
+print(result.content)
+print(result.tool_calls)
+```
+
+Tool calling is non-streaming because the complete envelope must be validated
+before a function can be selected or executed.
+
+---
+
 ## Supported Models
 
 DeepWrap currently supports:
@@ -281,6 +341,9 @@ expert
 default
 vision
 ```
+
+Web search is supported only by `default` (Instant). DeepWrap always sends
+`search_enabled=false` for `expert` and `vision`, even if `search=True` is passed.
 
 Example:
 
@@ -329,6 +392,17 @@ Run the interactive terminal interface:
 ```bash
 deepwrap
 ```
+
+To attach an image in interactive mode:
+
+```text
+/model vision
+/attach ./photo.png
+Describe this image.
+```
+
+Use `/attachments` to inspect pending files and `/detach` to clear them. Pending
+attachments are consumed after the next successful response.
 
 Send a single message from the terminal:
 
@@ -449,7 +523,7 @@ Example response:
 {
   "ok": true,
   "app": "deepwrap",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "token_configured": true,
   "cached_clients": 1,
   "active_sessions": 0

@@ -5,19 +5,31 @@ import threading
 import uuid
 
 from dataclasses import dataclass, field
-from typing import Dict, Generator, Literal, Optional
+from typing import Any, Dict, Generator, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from deepwrap import Client
+from deepwrap.function_calling import Tool
 from deepwrap.utils.config_store import ConfigStore
 from deepwrap.config import PROJECT_VERSION
 
 
 ModelName = Literal["expert", "default", "vision"]
 StreamFormat = Literal["text", "sse"]
+
+
+class ToolDefinition(BaseModel):
+    name: str = Field(..., min_length=1)
+    description: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolCallResponse(BaseModel):
+    name: str
+    arguments: dict[str, Any]
 
 
 class ChatRequest(BaseModel):
@@ -30,6 +42,9 @@ class ChatRequest(BaseModel):
     stream: bool = False
     stream_format: StreamFormat = "text"
     session_id: Optional[str] = None
+    files: list[str] = Field(default_factory=list)
+    file_ids: list[str] = Field(default_factory=list)
+    tools: list[ToolDefinition] = Field(default_factory=list)
 
     @field_validator("message")
     @classmethod
@@ -46,6 +61,7 @@ class ChatResponse(BaseModel):
     model: str
     response: str
     session_id: Optional[str] = None
+    tool_calls: list[ToolCallResponse] = Field(default_factory=list)
 
 
 class CreateSessionRequest(BaseModel):
@@ -276,6 +292,16 @@ def create_app() -> FastAPI:
 
     @app.post("/chat")
     def chat(request: ChatRequest):
+        if (request.files or request.file_ids) and request.model != "vision":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File attachments are supported only by the vision model.",
+            )
+        if request.tools and request.stream:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tool calling currently requires stream=false.",
+            )
         if request.session_id:
             record = state.get_session(request.session_id)
 
@@ -311,6 +337,8 @@ def create_app() -> FastAPI:
                             thinking=request.thinking,
                             search=request.search,
                             stream=True,
+                            files=request.files,
+                            file_ids=request.file_ids,
                         ):
                             yield chunk
 
@@ -325,6 +353,8 @@ def create_app() -> FastAPI:
                             thinking=request.thinking,
                             search=request.search,
                             stream=True,
+                            files=request.files,
+                            file_ids=request.file_ids,
                         ):
                             yield format_sse_chunk(chunk)
 
@@ -350,12 +380,34 @@ def create_app() -> FastAPI:
 
         with session_lock:
             try:
-                response = chat_session.respond(
-                    request.message,
-                    thinking=request.thinking,
-                    search=request.search,
-                    stream=False,
-                )
+                if request.tools:
+                    tool_response = chat_session.respond_with_tools(
+                        request.message,
+                        [
+                            Tool(
+                                name=tool.name,
+                                description=tool.description,
+                                parameters=tool.parameters,
+                            )
+                            for tool in request.tools
+                        ],
+                        thinking=request.thinking,
+                    )
+                    response = tool_response.content
+                    tool_calls = [
+                        ToolCallResponse(name=call.name, arguments=call.arguments)
+                        for call in tool_response.tool_calls
+                    ]
+                else:
+                    response = chat_session.respond(
+                        request.message,
+                        thinking=request.thinking,
+                        search=request.search,
+                        stream=False,
+                        files=request.files,
+                        file_ids=request.file_ids,
+                    )
+                    tool_calls = []
             except Exception as exc:
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
@@ -366,6 +418,7 @@ def create_app() -> FastAPI:
             model=request.model,
             response=response,
             session_id=response_session_id,
+            tool_calls=tool_calls,
         )
 
     return app

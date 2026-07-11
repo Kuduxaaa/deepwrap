@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 
 from deepwrap.core import SessionManager, Auth
-from deepwrap.api import ChatsAPI, PowAPI
+from deepwrap.api import ChatsAPI, FilesAPI, PowAPI
 from deepwrap.api.chat_session import ChatSession
 from deepwrap.utils.config_store import ConfigStore
 from deepwrap.utils.bearer_token_extractor import BearerTokenExtractor
@@ -53,6 +53,7 @@ class Client:
 
         self.session       = SessionManager(bearer_token = bearer_token)
         self.pow           = PowAPI(self)
+        self.files         = FilesAPI(self)
         self.chats         = ChatsAPI(self)
 
         self._conversations: dict[str, ChatSession] = {}

@@ -14,9 +14,8 @@ from deepwrap.utils.config_store import AppConfig as CLIConfig
 from deepwrap.utils.config_store import ConfigStore
 
 try:
-    from rich.console import Console, Group
+    from rich.console import Console
     from rich.live import Live
-    from rich.markdown import Markdown
     from rich.rule import Rule
     from rich.spinner import Spinner
     from rich.text import Text
@@ -59,6 +58,9 @@ COMMANDS         = (
     "/thinking",
     "/search",
     "/god",
+    "/attach",
+    "/attachments",
+    "/detach",
     "/save",
     "/status",
 )
@@ -74,6 +76,9 @@ HELP_ITEMS = [
     ("/thinking on|off", "Show or hide <think> blocks in UI"),
     ("/search on|off",   "Enable or disable search"),
     ("/god on|off",      "Enable or disable God Mode"),
+    ("/attach <path>",   "Upload a file for the next vision prompt"),
+    ("/attachments",     "Show files attached to the next prompt"),
+    ("/detach",          "Clear pending attachments"),
     ("/save",            "Save current settings to config"),
     ("/status",          "Show current session status"),
 ]
@@ -126,6 +131,7 @@ class DeepWrapCLI:
         self.client: Optional[Client] = None
         self.chat                     = None
         self._last_ctrl_c_at          = 0.0
+        self._pending_files: list[tuple[str, str]] = []
 
         if self.config.token:
             self._boot_client()
@@ -279,6 +285,7 @@ class DeepWrapCLI:
                 return True
 
             self.config.model = model
+            self._pending_files.clear()
             self._create_chat()
             self._print_system(f"Model switched to {model}.", style = "green")
             return True
@@ -301,6 +308,14 @@ class DeepWrapCLI:
             return True
 
         if command == "/search":
+            if self.config.model != "default":
+                self.config.search_enabled = False
+                self._print_system(
+                    "Web search is available only for the default (Instant) model.",
+                    style = "yellow",
+                )
+                return True
+
             if not args:
                 state = "on" if self.config.search_enabled else "off"
                 self._print_system(f"Search is {state}.", style = "cyan")
@@ -315,6 +330,42 @@ class DeepWrapCLI:
             self.config.search_enabled = value == "on"
             state = "enabled" if self.config.search_enabled else "disabled"
             self._print_system(f"Search is now {state}.", style = "green")
+            return True
+
+        if command == "/attach":
+            if self.config.model != "vision":
+                self._print_system(
+                    "Attachments are available only for the vision model.",
+                    style = "yellow",
+                )
+                return True
+            if not args:
+                self._print_system("Usage: /attach <path>", style = "red")
+                return True
+            if not self._ensure_chat():
+                return True
+            path = Path(args[0]).expanduser()
+            try:
+                self._print_system(f"Uploading {path.name}...", style = "cyan")
+                uploaded = self.chat.upload_file(path)
+            except Exception as exc:
+                self._print_system(f"Upload failed: {exc}", style = "red")
+                return True
+            self._pending_files.append((uploaded.id, uploaded.name))
+            self._print_system(f"Attached {uploaded.name}.", style = "green")
+            return True
+
+        if command == "/attachments":
+            if not self._pending_files:
+                self._print_system("No files are attached.", style = "cyan")
+            else:
+                names = "\n".join(f"- {name}" for _, name in self._pending_files)
+                self._print_system(f"Pending attachments:\n{names}", style = "cyan")
+            return True
+
+        if command == "/detach":
+            self._pending_files.clear()
+            self._print_system("Pending attachments cleared.", style = "green")
             return True
 
         if command == "/god":
@@ -639,133 +690,56 @@ class DeepWrapCLI:
 
     def _stream_assistant(self, prompt: str) -> None:
         """
-        Render assistant output live with markdown formatting.
-
-        The live region is intentionally cropped near the terminal bottom edge
-        to avoid crashes or cursor corruption in small terminals. After the
-        streaming finishes, the final full content is printed statically.
+        Render chunks incrementally so normal terminal scrollback remains usable.
         """
 
-        thinking = ""
-        answer   = ""
-        phase    = "thinking"
+        saw_thinking = False
+        saw_answer = False
+        spinner = Live(
+            Spinner("dots", text=" DeepWrap is thinking", style="bold #60a5fa"),
+            console=self.console,
+            transient=True,
+            refresh_per_second=12,
+        )
+        spinner.start()
+        try:
+            for kind, chunk in self.chat.respond_structured(
+                prompt=prompt,
+                thinking=True,
+                search=self.config.search_enabled,
+                ref_file_ids=[file_id for file_id, _ in self._pending_files],
+            ):
+                if kind == "think":
+                    if not self.config.show_thinking:
+                        continue
+                    if not saw_thinking:
+                        spinner.stop()
+                        self.console.print(Text("thinking", style="bold #60a5fa"))
+                        saw_thinking = True
+                    self.console.print(Text(chunk, style="dim #94a3b8"), end="")
+                elif kind == "response":
+                    if not saw_answer:
+                        spinner.stop()
+                        if saw_thinking:
+                            self.console.print("\n")
+                        self.console.print(Text("DeepWrap", style="bold #3b82f6"))
+                        saw_answer = True
+                    self.console.print(Text(chunk), end="")
 
-        with Live(
-            self._build_live_renderable(thinking, answer, phase),
-            console            = self.console,
-            refresh_per_second = 18,
-            transient          = True,
-            vertical_overflow  = "ellipsis",
-        ) as live:
-            try:
-                for kind, chunk in self.chat.respond_structured(
-                    prompt   = prompt,
-                    thinking = True,
-                    search   = self.config.search_enabled,
-                ):
-                    if kind == "think":
-                        thinking += chunk
-
-                        if not answer:
-                            phase = "thinking"
-
-                    elif kind == "response":
-                        answer += chunk
-                        phase = "response"
-
-                    live.update(
-                        self._build_live_renderable(
-                            thinking = thinking,
-                            answer   = answer,
-                            phase    = phase,
-                        )
-                    )
-
-            except KeyboardInterrupt:
-                live.stop()
-                self.console.print()
-                self._print_system(
-                    "Generation stopped.",
-                    style = "yellow",
-                )
-                return
-
-            except Exception as exc:
-                live.update(Text(str(exc), style = "bold red"))
-                return
-
-        self._print_assistant_final(thinking, answer)
-
-    def _build_live_renderable(
-        self,
-        thinking: str,
-        answer: str,
-        phase: str,
-    ):
-        """
-        Build the temporary live renderable shown while a response is streaming.
-        """
-
-        parts = []
-
-        if self.config.show_thinking:
-            if phase == "thinking":
-                parts.append(
-                    Spinner(
-                        "dots",
-                        text  = " thinking",
-                        style = "bold #60a5fa",
-                    )
-                )
-
-            elif thinking:
-                parts.append(Text("thinking", style = "bold #60a5fa"))
-
-            if thinking:
-                parts.append(Text(thinking, style = "dim #94a3b8"))
-
-            if thinking or phase == "thinking":
-                parts.append(Text(""))
-
-        else:
-            if phase == "thinking" and not answer:
-                parts.append(
-                    Spinner(
-                        "dots",
-                        text  = " DeepWrap is thinking",
-                        style = "bold #60a5fa",
-                    )
-                )
-                parts.append(Text(""))
-
-        if answer:
-            parts.append(Text("DeepWrap", style = "bold #3b82f6"))
-            parts.append(Markdown(answer))
-        else:
-            parts.append(Text("DeepWrap", style = "bold #3b82f6"))
-
-        return Group(*parts)
-
-    def _print_assistant_final(self, thinking: str, answer: str) -> None:
-        """
-        Print the final completed assistant output as normal static content.
-        """
-
-        self.console.print()
-
-        if self.config.show_thinking and thinking:
-            self.console.print(Text("thinking", style = "bold #60a5fa"))
-            self.console.print(Text(thinking, style = "dim #94a3b8"))
+            spinner.stop()
+            self._pending_files.clear()
+            if not saw_answer:
+                self.console.print(Text("DeepWrap", style="bold #3b82f6"))
+                self.console.print(Text("(empty response)", style="dim"), end="")
+            self.console.print("\n")
+        except KeyboardInterrupt:
+            spinner.stop()
             self.console.print()
-
-        self.console.print(Text("DeepWrap", style = "bold #3b82f6"))
-
-        if answer.strip():
-            self.console.print(Markdown(answer))
-        else:
-            self.console.print(Text("(empty response)", style = "dim"))
-
-        self.console.print()
+            self._print_system("Generation stopped.", style="yellow")
+        except Exception as exc:
+            spinner.stop()
+            self.console.print()
+            self._print_system(str(exc), style="bold red")
 
     def _render_header(self) -> None:
         """
@@ -807,7 +781,7 @@ class DeepWrapCLI:
         self.console.print(Rule(style = "#1e3a8a"))
         self.console.print(
             Text(
-                f"model={self.config.model}  |  token={token_state}  |  thinking={'on' if self.config.show_thinking else 'off'}  |  search={'on' if self.config.search_enabled else 'off'}  |  god={'on' if self.config.god_mode else 'off'}",
+                f"model={self.config.model}  |  token={token_state}  |  thinking={'on' if self.config.show_thinking else 'off'}  |  search={'on' if self.config.model == 'default' and self.config.search_enabled else 'off'}  |  god={'on' if self.config.god_mode else 'off'}",
                 style = "#93c5fd",
             )
         )
@@ -839,7 +813,8 @@ class DeepWrapCLI:
             f"model: {self.config.model}",
             f"token: {'set' if self.config.token else 'missing'}",
             f"thinking display: {'on' if self.config.show_thinking else 'off'}",
-            f"search: {'on' if self.config.search_enabled else 'off'}",
+            f"search: {'on' if self.config.model == 'default' and self.config.search_enabled else 'off'}",
+            f"pending attachments: {len(self._pending_files)}",
             f"god mode: {'on' if self.config.god_mode else 'off'}",
             f"chat session: {'active' if self.chat is not None else 'none'}",
             f"config file: {self.store.path}",

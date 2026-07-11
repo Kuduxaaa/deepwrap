@@ -1,9 +1,19 @@
 import json
 
-from typing import Generator, Literal, Optional
+from pathlib import Path
+from typing import Callable, Generator, Literal, Mapping, Optional, Sequence
 
 from .base import BaseAPI
 from deepwrap.config import Config
+from deepwrap.function_calling import (
+    Tool,
+    ToolCall,
+    ToolResponse,
+    build_tool_prompt,
+    build_tool_result,
+    execute_tool_call,
+    parse_tool_calls,
+)
 
 
 ChunkKind = Literal["think", "response"]
@@ -77,6 +87,7 @@ class ChatSession(BaseAPI):
         prompt: str,
         thinking: bool = True,
         search: bool = True,
+        ref_file_ids: Optional[Sequence[str]] = None,
     ) -> Generator[tuple[ChunkKind, str], None, None]:
         """
         Send a prompt and stream structured response chunks.
@@ -104,14 +115,17 @@ class ChatSession(BaseAPI):
             prompt = "\n".join(Config.god_mode).format(prompt)
             self._is_god_mode_triggered = True
 
+        if ref_file_ids and self.model_type != "vision":
+            raise ValueError("File attachments are supported only by the vision model.")
+
         body = {
             "chat_session_id":   self.session_id,
             "parent_message_id": self._last_message_id,
             "model_type":        self.model_type if self._last_message_id is None else None,
             "prompt":            prompt,
-            "ref_file_ids":      [],
+            "ref_file_ids":      list(ref_file_ids or ()),
             "thinking_enabled":  thinking,
-            "search_enabled":    search,
+            "search_enabled":    search if self.model_type == "default" else False,
             "action":            None,
             "preempt":           False,
         }
@@ -215,6 +229,7 @@ class ChatSession(BaseAPI):
         prompt: str,
         thinking: bool = True,
         search: bool = True,
+        ref_file_ids: Optional[Sequence[str]] = None,
     ) -> Generator[str, None, None]:
         """
         Internal flat streaming generator.
@@ -242,6 +257,7 @@ class ChatSession(BaseAPI):
             prompt   = prompt,
             thinking = thinking,
             search   = search,
+            ref_file_ids = ref_file_ids,
         ):
             if kind != active_kind:
                 if active_kind == "think":
@@ -263,6 +279,8 @@ class ChatSession(BaseAPI):
         thinking: bool = True,
         search: bool = True,
         stream: bool = True,
+        files: Optional[Sequence[str | Path]] = None,
+        file_ids: Optional[Sequence[str]] = None,
     ) -> str | Generator[str, None, None]:
         """
         Send a prompt and return either a stream or the full response.
@@ -287,11 +305,18 @@ class ChatSession(BaseAPI):
                 - a `str` when `stream=False`
         """
 
+        resolved_file_ids = list(file_ids or ())
+        if files:
+            if self.model_type != "vision":
+                raise ValueError("File attachments are supported only by the vision model.")
+            resolved_file_ids.extend(self.upload_file(path).id for path in files)
+
         if stream:
             return self._respond_stream(
                 prompt   = prompt,
                 thinking = thinking,
                 search   = search,
+                ref_file_ids = resolved_file_ids,
             )
 
         return "".join(
@@ -299,5 +324,65 @@ class ChatSession(BaseAPI):
                 prompt   = prompt,
                 thinking = thinking,
                 search   = search,
+                ref_file_ids = resolved_file_ids,
             )
         )
+
+    def upload_file(self, path: str | Path, *, timeout: float = 60.0):
+        """Upload and process a file for use by this vision session."""
+
+        if self.model_type != "vision":
+            raise ValueError("File attachments are supported only by the vision model.")
+        return self._client.files.upload_and_wait(
+            path,
+            model=self.model_type,
+            timeout=timeout,
+        )
+
+    def respond_with_tools(
+        self,
+        prompt: str,
+        tools: Sequence[Tool],
+        *,
+        functions: Optional[Mapping[str, Callable[..., object]]] = None,
+        thinking: bool = True,
+        max_tool_rounds: int = 4,
+    ) -> ToolResponse:
+        """Ask for tool calls and optionally execute them until a final answer."""
+
+        if not tools:
+            raise ValueError("At least one tool definition is required.")
+        if max_tool_rounds < 1:
+            raise ValueError("max_tool_rounds must be at least 1.")
+
+        known_names = {tool.name for tool in tools}
+        message = build_tool_prompt(prompt, tools)
+        call_history: list[ToolCall] = []
+
+        for _ in range(max_tool_rounds):
+            response = "".join(
+                chunk
+                for kind, chunk in self.respond_structured(
+                    message,
+                    thinking=thinking,
+                    search=False,
+                )
+                if kind == "response"
+            )
+            calls = parse_tool_calls(response)
+            if not calls:
+                return ToolResponse(content=response, tool_calls=tuple(call_history))
+            if len(calls) != 1:
+                raise ValueError("The model must return exactly one tool call per turn.")
+
+            call = calls[0]
+            if call.name not in known_names:
+                raise ValueError(f"Model requested an unknown tool: {call.name}")
+            call_history.append(call)
+            if functions is None:
+                return ToolResponse(content="", tool_calls=tuple(call_history))
+
+            result = execute_tool_call(call, functions)
+            message = build_tool_result(call, result)
+
+        raise RuntimeError(f"Tool-call loop exceeded {max_tool_rounds} rounds.")
