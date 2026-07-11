@@ -96,6 +96,7 @@ class Client:
 
         self._conversations: dict[str, ChatSession] = {}
         self._responses: dict[str, str]             = {}
+        self._loaded_sessions: set[str]             = set()
 
     def register_tool(
         self,
@@ -145,6 +146,14 @@ class Client:
             return ""
         sections: list[str] = []
         if session_id:
+            if session_id not in self._loaded_sessions:
+                self._loaded_sessions.add(session_id)
+                priority_mems = self.memory.get_priority_memories(limit=20, min_importance=0.9)
+                if priority_mems:
+                    sections.append(
+                        "[PRIORITY MEMORIES]\n"
+                        + "\n".join(f"- ({item['id']}) {item['content']}" for item in priority_mems)
+                    )
             context = self.memory.session_context(session_id, limit=20)
             if context:
                 sections.append("[RESUMED SESSION]\n" + context)

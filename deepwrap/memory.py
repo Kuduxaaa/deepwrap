@@ -146,6 +146,22 @@ class MemoryStore:
             ).fetchall()
         return [self._row(row) for row in rows]
 
+    def get_priority_memories(self, limit: int = 20, min_importance: float = 0.9) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM memories WHERE namespace = ? AND importance >= ? ORDER BY updated_at DESC LIMIT ?",
+                (self.namespace, min_importance, limit),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def has_turns(self, session_id: str) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COUNT(*) FROM turns WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return row[0] > 0 if row else False
+
     def forget(self, memory_id: str) -> dict[str, Any]:
         memory = self.get(memory_id)
         with self._lock, self._connection:

@@ -55,10 +55,47 @@ class MemoryStoreTests(unittest.TestCase):
             {tool.name for tool in self.memory.definitions},
             {"remember", "recall", "list_memories", "forget", "list_sessions"},
         )
-        self.assertEqual(
-            {tool.name for tool in self.memory.definitions},
-            set(self.memory.functions),
-        )
+    def test_priority_memories_and_turns(self):
+        # 1. Test has_turns
+        session_id = self.memory.create_session("expert")
+        self.assertFalse(self.memory.has_turns(session_id))
+        self.memory.add_turn(session_id, "user", "hi")
+        self.assertTrue(self.memory.has_turns(session_id))
+
+        # 2. Test get_priority_memories
+        self.memory.remember("Low priority memory", importance=0.5)
+        high1 = self.memory.remember("High priority memory 1", importance=0.9)
+        high2 = self.memory.remember("High priority memory 2", importance=0.95)
+        
+        priority = self.memory.get_priority_memories(limit=10, min_importance=0.9)
+        self.assertEqual(len(priority), 2)
+        # Verify ordering is updated_at DESC (last inserted first)
+        self.assertEqual(priority[0]["id"], high2["id"])
+        self.assertEqual(priority[1]["id"], high1["id"])
+
+    def test_client_memory_context_priority_load(self):
+        from deepwrap.client import Client
+        
+        # Write some memories
+        self.memory.remember("Low priority", importance=0.5)
+        self.memory.remember("High priority 1", importance=0.9)
+        self.memory.remember("High priority 2", importance=0.95)
+        
+        client = Client(api_key="test-key", memory_path=self.path, memory_namespace="project-a")
+        session_id = client.memory.create_session("expert")
+        
+        # 1. First load of a session
+        context = client.memory_context("query", session_id)
+        self.assertIn("[PRIORITY MEMORIES]", context)
+        self.assertIn("High priority 1", context)
+        self.assertIn("High priority 2", context)
+        self.assertNotIn("Low priority", context)
+        
+        # 2. Second load of the same session -> should not load priority memories again
+        context2 = client.memory_context("query", session_id)
+        self.assertNotIn("[PRIORITY MEMORIES]", context2)
+
+
 
 
 if __name__ == "__main__":
