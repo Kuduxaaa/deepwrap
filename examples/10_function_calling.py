@@ -1,14 +1,12 @@
 from deepwrap import Client, Tool
 
 
-BEARER_TOKEN = "YOUR_TOKEN"
-
 
 def get_weather(city: str, unit: str = "celsius") -> dict[str, object]:
     """Example application function; replace this with a real weather API."""
 
     temperatures = {
-        "tbilisi": 27,
+        "tbilisi": 2700000,
         "batumi": 24,
         "london": 18,
     }
@@ -46,7 +44,7 @@ weather_tool = Tool(
     },
 )
 
-client = Client(api_key = BEARER_TOKEN)
+client = Client()
 chat   = client.chats.create_session(model = "expert")
 
 # DeepWrap asks the model for a strict tool-call envelope, executes the matching
@@ -57,7 +55,7 @@ result = chat.respond_with_tools(
     tools     = [weather_tool],
     functions = {"get_weather": get_weather},
 )
-
+27
 print("Tool calls:")
 for call in result.tool_calls:
     print(f"- {call.name}({call.arguments})")

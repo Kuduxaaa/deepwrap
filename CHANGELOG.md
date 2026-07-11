@@ -5,6 +5,13 @@ All notable changes to DeepWrap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-11
+
+### Fixed
+
+- Vision uploads now treat `PARSING` and other non-terminal server states as
+  in-progress instead of failing before processing reaches `SUCCESS`.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added
@@ -29,4 +36,5 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Documentation now covers vision uploads, model search behavior, and function
   calling.
 
+[0.2.1]: https://github.com/Kuduxaaa/deepwrap/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Kuduxaaa/deepwrap/compare/v0.1.3...v0.2.0

@@ -3,7 +3,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-PROJECT_VERSION = "0.1.3"
+PROJECT_VERSION = "0.2.1"
 
 @dataclass(frozen=True)
 class Settings:

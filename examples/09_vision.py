@@ -3,15 +3,14 @@ from pathlib import Path
 from deepwrap import Client
 
 
-BEARER_TOKEN = "YOUR_TOKEN"
-IMAGE_PATH  = Path("path/to/image.png")
+IMAGE_PATH  = Path("/home/kuduxaaa/Pictures/Screenshot from 2026-07-11 18-02-06.png")
 
 if not IMAGE_PATH.is_file():
     raise FileNotFoundError(
         f"Set IMAGE_PATH to an existing image before running this example: {IMAGE_PATH}"
     )
 
-client = Client(api_key = BEARER_TOKEN)
+client = Client()
 chat   = client.chats.create_session(model = "vision")
 
 # DeepWrap uploads the image, waits until DeepSeek finishes processing it,

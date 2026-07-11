@@ -32,6 +32,13 @@ class FilesAPI(BaseAPI):
     UPLOAD_PATH = "/api/v0/file/upload_file"
     UPLOAD_ENDPOINT = f"{Config.base_url}{UPLOAD_PATH}"
     FETCH_ENDPOINT = f"{Config.base_url}{Config.api_prefix}/file/fetch_files"
+    FAILED_STATUSES = {
+        "FAILED",
+        "ERROR",
+        "REJECTED",
+        "CANCELLED",
+        "EXPIRED",
+    }
 
     @staticmethod
     def _unwrap(payload: dict[str, Any]) -> dict[str, Any]:
@@ -106,9 +113,10 @@ class FilesAPI(BaseAPI):
             records = self.fetch([file_id])
             if records:
                 record = records[0]
-                if record.status == "SUCCESS":
+                status = record.status.upper()
+                if status == "SUCCESS":
                     return record
-                if record.status not in {"PENDING", "PROCESSING"}:
+                if status in self.FAILED_STATUSES or status.endswith("_FAILED"):
                     raise RuntimeError(
                         f"File processing failed for {file_id}: {record.status}"
                     )

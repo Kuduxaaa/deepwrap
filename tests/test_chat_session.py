@@ -132,6 +132,37 @@ class FilesAPITests(unittest.TestCase):
         self.assertEqual(call.kwargs["headers"]["x-file-size"], "3")
         client.pow.build_header.assert_called_once_with("/api/v0/file/upload_file")
 
+    def test_wait_treats_parsing_as_an_intermediate_status(self):
+        client = Mock()
+        client.session = Mock()
+        api = FilesAPI(client)
+        parsing = api._to_uploaded_file(
+            {
+                "id": "file-1",
+                "status": "PARSING",
+                "file_name": "image.png",
+                "file_size": 3,
+                "model_kind": "VISION",
+                "is_image": True,
+            }
+        )
+        success = api._to_uploaded_file(
+            {
+                "id": "file-1",
+                "status": "SUCCESS",
+                "file_name": "image.png",
+                "file_size": 3,
+                "model_kind": "VISION",
+                "is_image": True,
+            }
+        )
+        api.fetch = Mock(side_effect=[[parsing], [success]])
+
+        result = api.wait_until_ready("file-1", timeout=1, poll_interval=0)
+
+        self.assertEqual(result.status, "SUCCESS")
+        self.assertEqual(api.fetch.call_count, 2)
+
 
 class FunctionProtocolTests(unittest.TestCase):
     def test_parser_supports_nested_arguments(self):
