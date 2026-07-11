@@ -1,13 +1,19 @@
 import os
 import uuid
+import hashlib
 
-from typing import Optional
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from deepwrap.core import SessionManager, Auth
 from deepwrap.api import ChatsAPI, FilesAPI, PowAPI
 from deepwrap.api.chat_session import ChatSession
 from deepwrap.utils.config_store import ConfigStore
 from deepwrap.utils.bearer_token_extractor import BearerTokenExtractor
+from deepwrap.native_tools import NativeTools
+from deepwrap.function_calling import Tool
+from deepwrap.memory import MemoryStore
+from deepwrap.project_intelligence import ProjectIntelligence
 
 class Client:
     """
@@ -26,7 +32,15 @@ class Client:
         self, 
         api_key: Optional[str] = None,
         allow_browser_auth: bool = False,
-        auth_timeout: Optional[int] = None
+        auth_timeout: Optional[int] = None,
+        agent_mode: bool = True,
+        working_directory: Optional[str | Path] = None,
+        command_timeout: float = 30.0,
+        max_agent_rounds: int = 8,
+        memory_enabled: bool = True,
+        memory_path: Optional[str | Path] = None,
+        memory_namespace: str = "default",
+        resume_session_id: Optional[str] = None,
     ) -> None:
         """
         Initialize the public client.
@@ -44,6 +58,30 @@ class Client:
         """
 
         self.auth = Auth()
+        self.agent_mode = agent_mode
+        self.max_agent_rounds = max_agent_rounds
+        self.native_tools = NativeTools(
+            working_directory=working_directory,
+            timeout=command_timeout,
+        )
+        self._custom_tools: dict[str, tuple[Tool, Callable[..., Any]]] = {}
+        self.memory = (
+            MemoryStore(
+                memory_path or (ConfigStore().path.parent / "memory.db"),
+                namespace=memory_namespace,
+            )
+            if memory_enabled
+            else None
+        )
+        project_root = self.native_tools.working_directory
+        project_key = hashlib.sha256(str(project_root).encode()).hexdigest()[:16]
+        self.project = ProjectIntelligence(
+            project_root,
+            ConfigStore().path.parent / "projects" / f"{project_key}.json",
+        )
+
+        self._resume_session_id = resume_session_id
+        self._resume_claimed = False
 
         bearer_token = self._resolve_token(
             api_key            = api_key,
@@ -58,6 +96,65 @@ class Client:
 
         self._conversations: dict[str, ChatSession] = {}
         self._responses: dict[str, str]             = {}
+
+    def register_tool(
+        self,
+        tool: Tool,
+        function: Callable[..., Any],
+        *,
+        replace: bool = False,
+    ) -> None:
+        """Register an application-specific tool in the default agent loop."""
+
+        native_names = set(self.native_tools.functions)
+        if tool.name in native_names:
+            raise ValueError(f"Cannot replace native tool: {tool.name}")
+        if tool.name in self._custom_tools and not replace:
+            raise ValueError(f"Tool is already registered: {tool.name}")
+        self._custom_tools[tool.name] = (tool, function)
+
+    @property
+    def agent_tools(self) -> tuple[Tool, ...]:
+        memory_tools = self.memory.definitions if self.memory is not None else ()
+        return self.native_tools.definitions + memory_tools + self.project.definitions + tuple(
+            item[0] for item in self._custom_tools.values()
+        )
+
+    @property
+    def agent_functions(self) -> dict[str, Callable[..., Any]]:
+        functions = dict(self.native_tools.functions)
+        if self.memory is not None:
+            functions.update(self.memory.functions)
+        functions.update(self.project.functions)
+        functions.update(
+            {name: item[1] for name, item in self._custom_tools.items()}
+        )
+        return functions
+
+    def _claim_memory_session(self, model: str) -> Optional[str]:
+        if self.memory is None:
+            return None
+        if self._resume_session_id and not self._resume_claimed:
+            self.memory.session_context(self._resume_session_id, limit=1)
+            self._resume_claimed = True
+            return self._resume_session_id
+        return self.memory.create_session(model=model)
+
+    def memory_context(self, query: str, session_id: Optional[str]) -> str:
+        if self.memory is None:
+            return ""
+        sections: list[str] = []
+        if session_id:
+            context = self.memory.session_context(session_id, limit=20)
+            if context:
+                sections.append("[RESUMED SESSION]\n" + context)
+        recalled = self.memory.recall(query, limit=8)
+        if recalled:
+            sections.append(
+                "[RELEVANT LONG-TERM MEMORY]\n"
+                + "\n".join(f"- ({item['id']}) {item['content']}" for item in recalled)
+            )
+        return "\n\n".join(sections)
 
 
     @classmethod

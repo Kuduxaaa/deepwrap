@@ -1,6 +1,6 @@
 from deepwrap import Client
 
-BEARER_TOKEN = "YOUR_TOKEN"
+BEARER_TOKEN = None
 MODEL        = "expert"
 
 client = Client(api_key = BEARER_TOKEN)

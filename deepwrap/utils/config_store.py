@@ -13,9 +13,10 @@ APP_NAME = "deepwrap"
 class AppConfig:
     token: Optional[str] = None
     model: str = "expert"
-    show_thinking: bool = True
+    show_thinking: bool = False
     search_enabled: bool = True
     god_mode: bool = False
+    agent_mode: bool = True
 
 
 class ConfigStore:
@@ -51,9 +52,10 @@ class ConfigStore:
         return AppConfig(
             token          = payload.get("token"),
             model          = payload.get("model", "expert"),
-            show_thinking  = bool(payload.get("show_thinking", True)),
+            show_thinking  = bool(payload.get("show_thinking", False)),
             search_enabled = bool(payload.get("search_enabled", True)),
             god_mode       = bool(payload.get("god_mode", False)),
+            agent_mode     = bool(payload.get("agent_mode", True)),
         )
 
     def save(self, config: AppConfig) -> None:

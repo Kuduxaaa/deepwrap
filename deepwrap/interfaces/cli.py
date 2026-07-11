@@ -14,8 +14,11 @@ from deepwrap.utils.config_store import AppConfig as CLIConfig
 from deepwrap.utils.config_store import ConfigStore
 
 try:
+    from rich import box
     from rich.console import Console
     from rich.live import Live
+    from rich.markdown import Markdown
+    from rich.panel import Panel
     from rich.rule import Rule
     from rich.spinner import Spinner
     from rich.text import Text
@@ -41,12 +44,22 @@ except ImportError as exc:  # pragma: no cover
         "Missing dependency: prompt_toolkit. Install it with: pip install prompt_toolkit"
     ) from exc
 
-from deepwrap import Client
+from deepwrap import AgentEvent, Client, Tool
 from deepwrap.core import Auth
 
 APP_NAME         = "deepwrap"
 TOKEN_ENV_NAME   = "DEEPWRAP_API_KEY"
 SUPPORTED_MODELS = ("expert", "default", "vision")
+THINKING_BOX = box.Box(
+    "    \n"
+    "    \n"
+    "    \n"
+    "    \n"
+    "    \n"
+    "    \n"
+    "    \n"
+    "    \n"
+)
 COMMANDS         = (
     "/help",
     "/exit",
@@ -84,6 +97,43 @@ HELP_ITEMS = [
 ]
 
 
+class MarkdownStreamRenderer:
+    """Render complete Markdown blocks incrementally into normal scrollback."""
+
+    def __init__(self, console: Console) -> None:
+        self.console = console
+        self.buffer = ""
+
+    @staticmethod
+    def _fences_are_closed(text: str) -> bool:
+        return text.count("```") % 2 == 0 and text.count("~~~") % 2 == 0
+
+    def feed(self, chunk: str) -> None:
+        self.buffer += chunk
+        search_from = 0
+        while True:
+            boundary = self.buffer.find("\n\n", search_from)
+            if boundary < 0:
+                return
+            end = boundary + 2
+            candidate = self.buffer[:end]
+            if not self._fences_are_closed(candidate):
+                search_from = end
+                continue
+            self._render(candidate)
+            self.buffer = self.buffer[end:]
+            search_from = 0
+
+    def finish(self) -> None:
+        if self.buffer:
+            self._render(self.buffer)
+            self.buffer = ""
+
+    def _render(self, text: str) -> None:
+        if text.strip():
+            self.console.print(Markdown(text.rstrip()))
+
+
 
 class SlashCommandCompleter(Completer):
     """
@@ -114,6 +164,8 @@ class DeepWrapCLI:
         self.console = Console(highlight = False)
         self.store   = ConfigStore()
         self.config  = self.store.load()
+        # The interactive CLI is agent-first. Ignore legacy saved opt-out values.
+        self.config.agent_mode = True
 
         env_token = os.getenv(TOKEN_ENV_NAME) or os.getenv("DEEPSEEK_API_KEY")
         if env_token:
@@ -132,6 +184,9 @@ class DeepWrapCLI:
         self.chat                     = None
         self._last_ctrl_c_at          = 0.0
         self._pending_files: list[tuple[str, str]] = []
+        self._exit_requested = False
+        self._clear_requested = False
+        self._token_setup_requested = False
 
         if self.config.token:
             self._boot_client()
@@ -222,6 +277,17 @@ class DeepWrapCLI:
 
             self._render_user(message)
             self._stream_assistant(message)
+            if self._exit_requested:
+                self._print_system("Bye.", style="dim")
+                return
+            if self._clear_requested:
+                self._clear_requested = False
+                self._clear_screen()
+                self._render_header()
+                self._render_intro()
+            if self._token_setup_requested:
+                self._token_setup_requested = False
+                self._set_token_interactive()
 
     def _handle_command(self, raw: str) -> bool:
         """
@@ -381,7 +447,10 @@ class DeepWrapCLI:
                 return True
 
             self.config.god_mode = value == "on"
-            self._create_chat()
+            if self.chat is not None:
+                self.chat.god_mode = self.config.god_mode
+                if self.config.god_mode:
+                    self.chat._is_god_mode_triggered = False
             state = "enabled" if self.config.god_mode else "disabled"
             self._print_system(f"God Mode is now {state}.", style = "green")
             return True
@@ -703,9 +772,156 @@ class DeepWrapCLI:
         )
         spinner.start()
         try:
+            if self.config.agent_mode:
+                showing_thinking = False
+                spinner_stopped = False
+                thinking_text = ""
+                thinking_live = None
+
+                def show_agent_event(event):
+                    nonlocal showing_thinking, spinner_stopped, thinking_text, thinking_live
+
+                    def ensure_spinner_stopped():
+                        nonlocal spinner_stopped
+                        if not spinner_stopped:
+                            spinner.stop()
+                            spinner_stopped = True
+
+                    def ensure_thinking_finished():
+                        nonlocal showing_thinking, thinking_live
+                        if showing_thinking and thinking_live is not None:
+                            thinking_live.stop()
+                            self.console.print(
+                                Panel(
+                                    Text(thinking_text, style="dim #94a3b8"),
+                                    style="on #1e293b",
+                                    box=THINKING_BOX,
+                                    expand=True,
+                                    padding=(0, 0),
+                                )
+                            )
+                            showing_thinking = False
+                            thinking_live = None
+
+                    if event.type == "thinking":
+                        if not self.config.show_thinking:
+                            return
+                        ensure_spinner_stopped()
+                        thinking_text += event.message
+                        if not showing_thinking:
+                            self.console.print(
+                                Text("thinking", style="bold #60a5fa")
+                            )
+                            showing_thinking = True
+                            thinking_live = Live(
+                                Panel(
+                                    Text(thinking_text, style="dim #94a3b8"),
+                                    style="on #1e293b",
+                                    box=THINKING_BOX,
+                                    expand=True,
+                                    padding=(0, 0),
+                                ),
+                                console=self.console,
+                                transient=True,
+                            )
+                            thinking_live.start()
+                        else:
+                            thinking_live.update(
+                                Panel(
+                                    Text(thinking_text, style="dim #94a3b8"),
+                                    style="on #1e293b",
+                                    box=THINKING_BOX,
+                                    expand=True,
+                                    padding=(0, 0),
+                                )
+                            )
+                        return
+
+                    detail = event.message
+                    if event.type == "tool_started" and event.arguments:
+                        preview = ", ".join(
+                            f"{key}={str(value)[:60]}"
+                            for key, value in event.arguments.items()
+                            if key != "content"
+                        )
+                        if preview:
+                            detail = f"{detail[:-1]} ({preview})"
+                    if event.type == "tool_started":
+                        ensure_spinner_stopped()
+                        ensure_thinking_finished()
+                        self.console.print(
+                            Text(f"  → {detail}", style="dim #93c5fd")
+                        )
+                    elif event.type == "tool_completed":
+                        ensure_spinner_stopped()
+                        ensure_thinking_finished()
+                        duration = event.duration_seconds or 0.0
+                        self.console.print(
+                            Text(
+                                f"  ✓ {event.tool_name} completed in {duration:.2f}s",
+                                style="dim green",
+                            )
+                        )
+                    elif event.type == "responding":
+                        ensure_spinner_stopped()
+                        ensure_thinking_finished()
+                    elif event.type == "planning":
+                        if spinner_stopped:
+                            self.console.print(
+                                Text(f"  → {detail}", style="dim #93c5fd")
+                            )
+                        else:
+                            spinner.update(
+                                Spinner(
+                                    "dots",
+                                    text=f" {detail}",
+                                    style="bold #60a5fa",
+                                )
+                            )
+                    elif not spinner_stopped:
+                        spinner.update(
+                            Spinner(
+                                "dots",
+                                text=f" {detail}",
+                                style="bold #60a5fa",
+                            )
+                        )
+
+                markdown = MarkdownStreamRenderer(self.console)
+                for chunk in self.chat.respond(
+                    prompt,
+                    thinking=self.config.show_thinking,
+                    search=self.config.search_enabled,
+                    stream=True,
+                    file_ids=[file_id for file_id, _ in self._pending_files],
+                    agent=True,
+                    on_event=show_agent_event,
+                ):
+                    if not saw_answer:
+                        if not spinner_stopped:
+                            spinner.stop()
+                            spinner_stopped = True
+                        self.console.print(Text("DeepWrap", style="bold #3b82f6"))
+                        saw_answer = True
+                    markdown.feed(chunk)
+                if not spinner_stopped:
+                    spinner.stop()
+                    spinner_stopped = True
+                show_agent_event(AgentEvent("responding", ""))
+                markdown.finish()
+                self._pending_files.clear()
+                if not saw_answer:
+                    self.console.print(Text("DeepWrap", style="bold #3b82f6"))
+                    self.console.print(Text("(empty response)", style="dim"), end="")
+                self.console.print()
+                return
+
+            thinking_text = ""
+            thinking_live = None
+
             for kind, chunk in self.chat.respond_structured(
                 prompt=prompt,
-                thinking=True,
+                thinking=self.config.show_thinking,
                 search=self.config.search_enabled,
                 ref_file_ids=[file_id for file_id, _ in self._pending_files],
             ):
@@ -716,17 +932,60 @@ class DeepWrapCLI:
                         spinner.stop()
                         self.console.print(Text("thinking", style="bold #60a5fa"))
                         saw_thinking = True
-                    self.console.print(Text(chunk, style="dim #94a3b8"), end="")
+                        thinking_live = Live(
+                            Panel(
+                                Text(thinking_text, style="dim #94a3b8"),
+                                style="on #1e293b",
+                                box=THINKING_BOX,
+                                expand=True,
+                                padding=(0, 0),
+                            ),
+                            console=self.console,
+                            transient=True,
+                        )
+                        thinking_live.start()
+                    thinking_text += chunk
+                    thinking_live.update(
+                        Panel(
+                            Text(thinking_text, style="dim #94a3b8"),
+                            style="on #1e293b",
+                            box=THINKING_BOX,
+                            expand=True,
+                            padding=(0, 0),
+                        )
+                    )
                 elif kind == "response":
                     if not saw_answer:
                         spinner.stop()
-                        if saw_thinking:
-                            self.console.print("\n")
+                        if saw_thinking and thinking_live is not None:
+                            thinking_live.stop()
+                            self.console.print(
+                                Panel(
+                                    Text(thinking_text, style="dim #94a3b8"),
+                                    style="on #1e293b",
+                                    box=THINKING_BOX,
+                                    expand=True,
+                                    padding=(0, 0),
+                                )
+                            )
+                            thinking_live = None
                         self.console.print(Text("DeepWrap", style="bold #3b82f6"))
                         saw_answer = True
                     self.console.print(Text(chunk), end="")
 
             spinner.stop()
+            if saw_thinking and thinking_live is not None:
+                thinking_live.stop()
+                self.console.print(
+                    Panel(
+                        Text(thinking_text, style="dim #94a3b8"),
+                        style="on #1e293b",
+                        box=THINKING_BOX,
+                        expand=True,
+                        padding=(0, 0),
+                    )
+                )
+                thinking_live = None
             self._pending_files.clear()
             if not saw_answer:
                 self.console.print(Text("DeepWrap", style="bold #3b82f6"))
@@ -734,10 +993,20 @@ class DeepWrapCLI:
             self.console.print("\n")
         except KeyboardInterrupt:
             spinner.stop()
+            if "thinking_live" in locals() and thinking_live is not None:
+                try:
+                    thinking_live.stop()
+                except Exception:
+                    pass
             self.console.print()
             self._print_system("Generation stopped.", style="yellow")
         except Exception as exc:
             spinner.stop()
+            if "thinking_live" in locals() and thinking_live is not None:
+                try:
+                    thinking_live.stop()
+                except Exception:
+                    pass
             self.console.print()
             self._print_system(str(exc), style="bold red")
 
@@ -776,16 +1045,7 @@ class DeepWrapCLI:
         Render current runtime state summary.
         """
 
-        token_state = "set" if self.config.token else "missing"
-
         self.console.print(Rule(style = "#1e3a8a"))
-        self.console.print(
-            Text(
-                f"model={self.config.model}  |  token={token_state}  |  thinking={'on' if self.config.show_thinking else 'off'}  |  search={'on' if self.config.model == 'default' and self.config.search_enabled else 'off'}  |  god={'on' if self.config.god_mode else 'off'}",
-                style = "#93c5fd",
-            )
-        )
-        self.console.print()
 
     def _render_help(self) -> None:
         """
@@ -816,6 +1076,7 @@ class DeepWrapCLI:
             f"search: {'on' if self.config.model == 'default' and self.config.search_enabled else 'off'}",
             f"pending attachments: {len(self._pending_files)}",
             f"god mode: {'on' if self.config.god_mode else 'off'}",
+            f"agent mode: {'on' if self.config.agent_mode else 'off'}",
             f"chat session: {'active' if self.chat is not None else 'none'}",
             f"config file: {self.store.path}",
         ]
@@ -863,7 +1124,12 @@ class DeepWrapCLI:
             return
 
         try:
-            self.client = Client(api_key = self.config.token)
+            self.client = Client(
+                api_key=self.config.token,
+                agent_mode=True,
+                working_directory=Path.cwd(),
+            )
+            self._register_cli_tools()
 
             if reset_chat:
                 self._create_chat()
@@ -877,6 +1143,179 @@ class DeepWrapCLI:
                 self._render_intro()
                 self._print_system("The provided token is invalid. Please set a valid token.", style = "red")
                 self._offer_token_setup()
+
+    def _register_cli_tools(self) -> None:
+        """Expose slash-command behavior to the natural-language CLI agent."""
+
+        if self.client is None:
+            return
+
+        def register(name, description, properties, required, function):
+            self.client.register_tool(
+                Tool(
+                    name=name,
+                    description=description,
+                    parameters={
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                        "additionalProperties": False,
+                    },
+                ),
+                function,
+            )
+
+        register(
+            "cli_clear",
+            "Clear the DeepWrap terminal UI when the user asks to clear the screen or chat display.",
+            {},
+            [],
+            self._tool_clear,
+        )
+        register(
+            "cli_new_chat",
+            "Start a fresh DeepWrap conversation, equivalent to /new.",
+            {},
+            [],
+            self._tool_new_chat,
+        )
+        register(
+            "cli_switch_model",
+            "Switch the CLI model and start a new conversation.",
+            {"model": {"type": "string", "enum": list(SUPPORTED_MODELS)}},
+            ["model"],
+            self._tool_switch_model,
+        )
+        for name, description, function in (
+            ("cli_set_thinking", "Show or hide thinking in plain CLI mode.", self._tool_set_thinking),
+            ("cli_set_search", "Enable or disable web search; only the default model supports it.", self._tool_set_search),
+            ("cli_set_god_mode", "Enable or disable God Mode and start a new conversation.", self._tool_set_god_mode),
+        ):
+            register(
+                name,
+                description,
+                {"enabled": {"type": "boolean"}},
+                ["enabled"],
+                function,
+            )
+        register("cli_save_config", "Save current CLI settings, equivalent to /save.", {}, [], self._tool_save_config)
+        register("cli_status", "Return current CLI state, equivalent to /status.", {}, [], self._tool_status)
+        register("cli_help", "Return available CLI commands and natural-language capabilities.", {}, [], self._tool_help)
+        register("cli_exit", "Exit DeepWrap after the current response, equivalent to /exit.", {}, [], self._tool_exit)
+        register("cli_token_setup", "Request secure interactive token setup; never ask for the token in chat.", {}, [], self._tool_token_setup)
+        register(
+            "cli_attach_file",
+            "Upload a local file for the next prompt in the current vision session.",
+            {"path": {"type": "string"}},
+            ["path"],
+            self._tool_attach_file,
+        )
+        register("cli_list_attachments", "List files attached to the next vision prompt.", {}, [], self._tool_list_attachments)
+        register("cli_detach_files", "Clear files pending for the next vision prompt.", {}, [], self._tool_detach_files)
+        register(
+            "inspect_image",
+            "Upload and visually inspect a local image using a dedicated vision session. Use whenever the user asks what is visible in an image path; no manual model switch is needed.",
+            {
+                "path": {"type": "string"},
+                "question": {"type": "string", "default": "Describe this image accurately."},
+            },
+            ["path"],
+            self._tool_inspect_image,
+        )
+
+    def _tool_clear(self):
+        self._clear_requested = True
+        self._create_chat()
+        return {"ok": True, "action": "screen_and_conversation_clear_scheduled"}
+
+    def _tool_new_chat(self):
+        self._create_chat()
+        return {"ok": True, "model": self.config.model}
+
+    def _tool_switch_model(self, model: str):
+        if model not in SUPPORTED_MODELS:
+            raise ValueError(f"Unsupported model: {model}")
+        self.config.model = model
+        self._pending_files.clear()
+        self._create_chat()
+        return {"ok": True, "model": model}
+
+    def _tool_set_thinking(self, enabled: bool):
+        self.config.show_thinking = enabled
+        return {"ok": True, "thinking": enabled}
+
+    def _tool_set_search(self, enabled: bool):
+        if enabled and self.config.model != "default":
+            return {"ok": False, "error": "Web search requires the default model."}
+        self.config.search_enabled = enabled
+        return {"ok": True, "search": enabled}
+
+    def _tool_set_god_mode(self, enabled: bool):
+        self.config.god_mode = enabled
+        if self.chat is not None:
+            self.chat.god_mode = enabled
+            if enabled:
+                self.chat._is_god_mode_triggered = False
+        return {"ok": True, "god_mode": enabled}
+
+    def _tool_save_config(self):
+        self.store.save(self.config)
+        return {"ok": True, "path": str(self.store.path)}
+
+    def _tool_status(self):
+        return {
+            "model": self.config.model,
+            "agent": True,
+            "thinking": self.config.show_thinking,
+            "search": self.config.model == "default" and self.config.search_enabled,
+            "god_mode": self.config.god_mode,
+            "pending_attachments": [name for _, name in self._pending_files],
+        }
+
+    def _tool_help(self):
+        return {"commands": [{"command": command, "description": description} for command, description in HELP_ITEMS]}
+
+    def _tool_exit(self):
+        self._exit_requested = True
+        return {"ok": True, "action": "exit_scheduled"}
+
+    def _tool_token_setup(self):
+        self._token_setup_requested = True
+        return {"ok": True, "action": "secure_token_prompt_scheduled"}
+
+    def _tool_attach_file(self, path: str):
+        if self.config.model != "vision":
+            raise ValueError("Switch to the vision model before attaching files for a later prompt.")
+        if self.chat is None:
+            raise RuntimeError("No active chat session.")
+        uploaded = self.chat.upload_file(Path(path).expanduser())
+        self._pending_files.append((uploaded.id, uploaded.name))
+        return {"ok": True, "file_id": uploaded.id, "name": uploaded.name}
+
+    def _tool_list_attachments(self):
+        return {"attachments": [{"id": file_id, "name": name} for file_id, name in self._pending_files]}
+
+    def _tool_detach_files(self):
+        count = len(self._pending_files)
+        self._pending_files.clear()
+        return {"ok": True, "detached": count}
+
+    def _tool_inspect_image(self, path: str, question: str = "Describe this image accurately."):
+        if self.client is None:
+            raise RuntimeError("No active DeepWrap client.")
+        image_path = Path(path).expanduser().resolve()
+        if not image_path.is_file():
+            raise FileNotFoundError(f"Image does not exist: {image_path}")
+        vision = self.client.chats.create_session(model="vision")
+        analysis = vision.respond(
+            question,
+            thinking=False,
+            search=False,
+            stream=False,
+            files=[image_path],
+            agent=False,
+        )
+        return {"path": str(image_path), "analysis": analysis}
 
     def _create_chat(self) -> None:
         """

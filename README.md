@@ -18,6 +18,9 @@
   - [Basic Non-Streaming Chat](#basic-non-streaming-chat)
   - [Streaming Chat](#streaming-chat)
   - [Multi-Turn Chat](#multi-turn-chat)
+  - [Agent Mode](#agent-mode)
+  - [Vision File Uploads](#vision-file-uploads)
+  - [Pseudo Function Calling](#pseudo-function-calling)
 - [Supported Models](#supported-models)
 - [God Mode](#god-mode)
   - [Python SDK](#python-sdk)
@@ -58,6 +61,7 @@ It provides:
 - Interactive terminal UI
 - FastAPI server mode
 - Internal proof-of-work handling
+- Default autonomous agent mode with native command, code, search, and file tools
 
 > Repository: [https://github.com/Kuduxaaa/deepwrap](https://github.com/Kuduxaaa/deepwrap)
 
@@ -269,6 +273,173 @@ print(chat.respond("What is my name?", stream=False))
 ```
 
 The `ChatSession` keeps track of the latest message ID internally, so follow-up messages stay inside the same conversation.
+
+---
+
+### Agent mode
+
+Agent mode is enabled by default. It upgrades regular chat sessions with native
+tools that the model can call repeatedly before returning its final answer:
+
+- `exec` — execute a command with the host operating system's shell.
+- `grep` — regex-search file contents with optional glob filters.
+- `read_file` — read any text file.
+- `write_file` — write complete content to a file.
+- `edit_file` — perform guarded exact-string substitutions.
+- `exec_code` — run Python code with access to installed modules.
+- `start_job` — launch a long command in its own background process.
+- `job_status` — check a background job without blocking.
+- `job_output` — read paginated stdout or stderr while a job runs.
+- `list_jobs` — list jobs owned by the current client.
+- `stop_job` — terminate a job and its process group.
+
+```python
+from pathlib import Path
+
+from deepwrap import Client
+
+client = Client(
+    working_directory=Path.cwd(),
+    command_timeout=30,
+    max_agent_rounds=8,
+)
+chat = client.chats.create_session(model="expert")
+
+result = chat.respond(
+    "Find every Python file containing ChatSession and summarize its usage.",
+    stream=False,
+)
+print(result)
+for execution in result.tools_used:
+    print(execution.name, execution.arguments, execution.output)
+```
+
+Streaming returns an `AgentStream`. Final-answer chunks arrive incrementally, and
+the same execution history is available after or during consumption:
+
+```python
+response = chat.respond("Inspect this project.", stream=True)
+
+for chunk in response:
+    print(chunk, end="", flush=True)
+
+for execution in response.tools_used:
+    print(execution.name, execution.arguments, execution.output)
+```
+
+For immediate progress while the agent is planning or running tools, pass an
+event callback:
+
+```python
+def show_progress(event):
+    print(f"[{event.type}] {event.message}", flush=True)
+
+response = chat.respond(
+    "Build a complete landing page in one HTML file.",
+    stream=True,
+    on_event=show_progress,
+)
+```
+
+Events include `started`, `planning`, `thinking`, `tool_started`, `tool_completed`,
+`responding`, and `completed`. The history remains available as
+`response.events`; tool events also include arguments, output, and duration.
+
+#### Background jobs
+
+Long-running commands can execute concurrently without blocking the agent response:
+
+```python
+response = chat.respond(
+    "Start the crawler as a background job and return immediately.",
+    stream=False,
+)
+
+job = next(
+    execution.output
+    for execution in response.tools_used
+    if execution.name == "start_job"
+)
+print(job["id"], job["state"])
+
+# A later turn in the same Client can inspect status and logs.
+print(chat.respond("Check that job and show its latest output.", stream=False))
+```
+
+Each job has an independent process group and file-backed stdout/stderr logs.
+`job_output` returns `next_offset`, allowing the agent to resume reading only new
+output. Jobs remain available across chat turns while the same `Client` process is
+alive. See `examples/15_background_jobs.py` for a complete example.
+
+> Run network scanners and similar tools only against systems and networks you own
+> or are explicitly authorized to assess.
+
+Non-streaming `AgentResponse` remains a subclass of `str`, so existing string
+handling continues to work. Each `tools_used` entry contains `name`, `arguments`,
+and `output`.
+
+Disable agent operations globally or for one request:
+
+```python
+client = Client(agent_mode=False)
+plain_response = chat.respond("Hello", agent=False, stream=False)
+```
+
+The interactive CLI always starts directly in agent mode; no activation command
+is required. The Python SDK and local HTTP API still accept an `agent` boolean
+for applications that explicitly need plain-chat behavior.
+
+#### Natural-language CLI actions
+
+Every slash-command capability is also registered as an agent tool. Users can
+control the CLI naturally without remembering command syntax:
+
+```text
+Please clear this chat and screen.
+Start a new conversation.
+Switch to the default model and enable search.
+Hide thinking output.
+Save my current settings.
+Show the current status.
+Exit DeepWrap.
+```
+
+Token changes schedule the secure hidden-input prompt; credentials are never
+accepted as model-generated tool arguments. Direct slash commands remain available.
+
+Local images are handled automatically through a dedicated vision session, even
+when the current model is `expert`:
+
+```text
+What can you see in /home/user/Pictures/photo.jpg?
+```
+
+The CLI agent selects `inspect_image`, uploads the file to a temporary vision chat,
+and feeds the visual analysis back into the current conversation. Manual
+`/model vision` and `/attach` remain useful when several follow-up prompts should
+reuse the same uploaded image.
+
+Thinking output works in agent mode as well as plain mode. Enabling or disabling
+God Mode updates the current session in place, so conversation and image context
+are preserved.
+
+For large repositories, `grep` and `read_file` return bounded pages with
+`has_more` and `next_offset`. The agent protocol instructs the model to search
+broadly, narrow relevant files, and follow pagination instead of flooding its
+context with entire projects.
+
+> Agent mode executes model-generated commands and code and can read or modify any
+> path available to the current operating-system user. Run it only in an environment
+> where that level of access is intended. Use `working_directory`, a dedicated user,
+> container, or virtual machine when isolation is required.
+
+Runnable examples:
+
+- `examples/11_agent.py` — agent-driven project search and summary.
+- `examples/12_native_tools.py` — direct use of all six native tools.
+- `examples/13_agent_file_edit.py` — autonomous read/edit/verification workflow.
+- `examples/14_agent_exec.py` — command and Python execution workflow.
+- `examples/15_background_jobs.py` — concurrent process jobs and later inspection.
 
 ---
 
@@ -523,7 +694,7 @@ Example response:
 {
   "ok": true,
   "app": "deepwrap",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "token_configured": true,
   "cached_clients": 1,
   "active_sessions": 0

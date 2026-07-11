@@ -45,6 +45,7 @@ class ChatRequest(BaseModel):
     files: list[str] = Field(default_factory=list)
     file_ids: list[str] = Field(default_factory=list)
     tools: list[ToolDefinition] = Field(default_factory=list)
+    agent: bool = True
 
     @field_validator("message")
     @classmethod
@@ -339,6 +340,7 @@ def create_app() -> FastAPI:
                             stream=True,
                             files=request.files,
                             file_ids=request.file_ids,
+                            agent=request.agent,
                         ):
                             yield chunk
 
@@ -355,6 +357,7 @@ def create_app() -> FastAPI:
                             stream=True,
                             files=request.files,
                             file_ids=request.file_ids,
+                            agent=request.agent,
                         ):
                             yield format_sse_chunk(chunk)
 
@@ -406,6 +409,7 @@ def create_app() -> FastAPI:
                         stream=False,
                         files=request.files,
                         file_ids=request.file_ids,
+                        agent=request.agent,
                     )
                     tool_calls = []
             except Exception as exc:

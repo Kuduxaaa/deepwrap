@@ -4,7 +4,7 @@ import json
 import re
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 
 TOOL_CALL_PATTERN = re.compile(
@@ -35,9 +35,65 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class ToolExecution:
+    name: str
+    arguments: dict[str, Any]
+    output: Any
+
+
+@dataclass(frozen=True)
+class AgentEvent:
+    type: str
+    message: str
+    tool_name: str | None = None
+    arguments: dict[str, Any] | None = None
+    output: Any = None
+    duration_seconds: float | None = None
+
+
+@dataclass(frozen=True)
 class ToolResponse:
     content: str
     tool_calls: tuple[ToolCall, ...] = ()
+    tools_used: tuple[ToolExecution, ...] = ()
+
+
+class AgentResponse(str):
+    """String-compatible final response with agent execution telemetry."""
+
+    tools_used: list[ToolExecution]
+    events: list[AgentEvent]
+
+    def __new__(
+        cls,
+        content: str,
+        tools_used: Sequence[ToolExecution] = (),
+        events: Sequence[AgentEvent] = (),
+    ) -> "AgentResponse":
+        instance = super().__new__(cls, content)
+        instance.tools_used = list(tools_used)
+        instance.events = list(events)
+        return instance
+
+
+class AgentStream(Iterator[str]):
+    """Streaming agent response whose telemetry fills as it is consumed."""
+
+    def __init__(
+        self,
+        iterator: Iterator[str],
+        tools_used: list[ToolExecution],
+        events: list[AgentEvent],
+    ) -> None:
+        self._iterator = iterator
+        self.tools_used = tools_used
+        self.events = events
+
+    def __iter__(self) -> "AgentStream":
+        return self
+
+    def __next__(self) -> str:
+        return next(self._iterator)
 
 
 def build_tool_prompt(prompt: str, tools: Sequence[Tool]) -> str:
@@ -48,12 +104,41 @@ def build_tool_prompt(prompt: str, tools: Sequence[Tool]) -> str:
     )
     return (
         "[DEEPWRAP SYSTEM TOOL PROTOCOL]\n"
-        "You have access to the tools listed below. If a tool is required, reply "
-        "with exactly one call and no other text:\n"
+        "You have access to the tools listed below. If tools are required, the "
+        "FIRST character of your response must be '<' from the tool envelope. "
+        "Do not explain, narrate, announce, or summarize before or after tool calls. "
+        "Reply with one or more calls and no other text. Emit a separate envelope "
+        "for each call:\n"
         '<deepwrap_tool_call>{"name":"tool_name","arguments":{}}</deepwrap_tool_call>\n'
         "Arguments must be valid JSON and conform to the tool's parameters schema. "
         "Never invent a tool. If no tool is required, answer the user normally and "
-        "do not emit a tool-call tag.\n"
+        "do not emit a tool-call tag. Work autonomously: inspect relevant context, "
+        "use tools for actions instead of claiming they were performed, continue "
+        "through as many tool-result turns as needed, recover from tool errors when "
+        "possible, and return a concise final answer only when the task is complete. "
+        "For large projects, search broadly with grep first, narrow the relevant "
+        "files, then read them in bounded chunks using offset/limit. Follow has_more "
+        "and next_offset until enough evidence is collected. Avoid reading every "
+        "large file in full when targeted search and pagination are sufficient. "
+        "After write_file, edit_file, exec, or exec_code changes state, verify the "
+        "result with an appropriate read, grep, or command before claiming success. "
+        "Never invent paths, command results, file contents, or completed actions. "
+        "Clearly distinguish verified observations from reasonable inferences.\n"
+        "For commands expected to run for a long time, or when the user explicitly "
+        "asks for background execution, use start_job instead of exec. Return the "
+        "job ID and running state promptly; do not block or repeatedly poll unless "
+        "the user asks you to wait. On later turns use job_status and job_output, "
+        "following output pagination, and use stop_job only when requested. "
+        "When an inspect_image tool is available and the user asks about a local "
+        "image path, use inspect_image; do not use read_file on binary image data. "
+        "A short acknowledgement such as okay, great, thanks, yes I know, or damn "
+        "is not permission to start, restart, replace, or stop a job. Never retry a "
+        "failed background command with changed arguments unless the user explicitly "
+        "asks to retry or previously authorized automatic recovery. Report the exact "
+        "failure and ask first. Before launching commands, validate paths, targets, "
+        "and syntax from verified tool output; never silently truncate or invent IP "
+        "addresses, host lists, filenames, or flags. Do not claim a command covers "
+        "targets or options that are absent from the actual executed command.\n"
         f"TOOLS={definitions}\n"
         "[END DEEPWRAP SYSTEM TOOL PROTOCOL]\n\n"
         f"USER MESSAGE:\n{prompt}"

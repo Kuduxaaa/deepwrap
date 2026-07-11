@@ -29,7 +29,53 @@ class ChatSessionTests(unittest.TestCase):
         client = Mock()
         client.session = Mock()
         client.pow.build_header.return_value = "pow"
+        client.agent_mode = False
         return ChatSession(client, "session-id", model)
+
+    def test_respond_uses_native_agent_by_default_when_enabled(self):
+        chat = self.make_chat("expert")
+        chat._client.agent_mode = True
+        native_tools = Mock()
+        native_tools.definitions = (
+            Tool(
+                name="echo",
+                description="Echo a value.",
+                parameters={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+            ),
+        )
+        native_tools.functions = {"echo": lambda value: value}
+        chat._client.native_tools = native_tools
+        chat._client.agent_tools = native_tools.definitions
+        chat._client.agent_functions = native_tools.functions
+        chat._client.max_agent_rounds = 6
+        turns = iter(
+            [
+                [
+                    (
+                        "response",
+                        "I should inspect this first.\n\n"
+                        '<deepwrap_tool_call>{"name":"echo","arguments":{"value":"ok"}}</deepwrap_tool_call>',
+                    )
+                ],
+                [("response", "final "), ("response", "answer")],
+            ]
+        )
+
+        def respond_structured(*args, **kwargs):
+            yield from next(turns)
+
+        chat.respond_structured = respond_structured
+
+        result = chat.respond("inspect the project", stream=False)
+
+        self.assertEqual(result, "final answer")
+        self.assertEqual(result.tools_used[0].name, "echo")
+        self.assertEqual(result.tools_used[0].arguments, {"value": "ok"})
+        self.assertEqual(result.tools_used[0].output, "ok")
 
     def test_search_is_disabled_for_expert(self):
         chat = self.make_chat("expert")
@@ -95,6 +141,45 @@ class ChatSessionTests(unittest.TestCase):
 
         self.assertEqual(result.content, "The result is 5.")
         self.assertEqual(result.tool_calls[0].name, "add")
+
+    def test_automatic_tool_loop_executes_multiple_calls_from_one_turn(self):
+        chat = self.make_chat()
+        outputs = iter(
+            [
+                '<deepwrap_tool_call>{"name":"double","arguments":{"value":2}}</deepwrap_tool_call>'
+                '<deepwrap_tool_call>{"name":"double","arguments":{"value":4}}</deepwrap_tool_call>',
+                "The results are 4 and 8.",
+            ]
+        )
+        executed = []
+
+        def respond_structured(*args, **kwargs):
+            yield "response", next(outputs)
+
+        def double(value):
+            executed.append(value)
+            return value * 2
+
+        chat.respond_structured = respond_structured
+        tool = Tool(
+            name="double",
+            description="Double a number.",
+            parameters={
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"],
+            },
+        )
+
+        result = chat.respond_with_tools(
+            "Double 2 and 4.",
+            [tool],
+            functions={"double": double},
+        )
+
+        self.assertEqual(executed, [2, 4])
+        self.assertEqual(len(result.tool_calls), 2)
+        self.assertEqual(result.content, "The results are 4 and 8.")
 
 
 class FilesAPITests(unittest.TestCase):

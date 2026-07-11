@@ -1,6 +1,9 @@
 from deepwrap import Client, Tool
 
 
+BEARER_TOKEN = None
+
+
 
 def get_weather(city: str, unit: str = "celsius") -> dict[str, object]:
     """Example application function; replace this with a real weather API."""
@@ -44,7 +47,7 @@ weather_tool = Tool(
     },
 )
 
-client = Client()
+client = Client(api_key = BEARER_TOKEN)
 chat   = client.chats.create_session(model = "expert")
 
 # DeepWrap asks the model for a strict tool-call envelope, executes the matching

@@ -1,6 +1,6 @@
 from deepwrap import Client
 
-BEARER_TOKEN = "YOUR_TOKEN"
+BEARER_TOKEN = None
 
 client = Client(api_key = BEARER_TOKEN)
 chat   = client.chats.create_session(model = "expert")
