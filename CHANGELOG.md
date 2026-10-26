@@ -5,7 +5,7 @@ All notable changes to DeepWrap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-10-26
 
 ### Added
 
@@ -80,10 +80,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - POSIX commands being sent to `cmd.exe` on Windows, which wasted a tool round
   on every attempt.
 
-## [0.2.3]
+## [0.2.3] - 2026-07-11
 
 ### Added
 
+- Long-term memory query to fetch and inject the last 20 memories with an
+  importance score of 0.9 or greater on the initial session load.
+- Unit tests covering priority memory loading, SQLite count checks, and
+  client-level context integration.
 - Default integrated agent mode with autonomous multi-round native tool usage.
 - Built-in `exec`, `grep`, `read_file`, `write_file`, `edit_file`, and
   `exec_code` tools.
@@ -123,16 +127,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The tool-call decision buffer now tolerates longer model narration without
   leaking raw tool envelopes into CLI output.
 
-## [0.2.3] - 2026-07-11
-
-### Added
-
-- Long-term memory query to fetch and inject the last 20 memories with an importance score of 0.9 or greater on the initial session load.
-- Unit tests covering priority memory loading, SQLite count checks, and client-level context integration.
-
 ### Changed
 
-- Compressed thinking panel card layout in the CLI by removing all vertical/horizontal extra margin padding (`padding=(0, 0)`).
+- Compressed the thinking panel card layout in the CLI by removing all vertical
+  and horizontal margin padding (`padding=(0, 0)`).
 
 ## [0.2.2] - 2026-07-11
 
