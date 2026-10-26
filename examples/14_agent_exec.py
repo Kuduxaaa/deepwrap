@@ -11,7 +11,7 @@ with TemporaryDirectory() as directory:
         api_key=BEARER_TOKEN,
         working_directory=directory,
         command_timeout=10,
-        max_agent_rounds=8,
+        max_agent_rounds=None,
     )
     print(directory)
     chat = client.chats.create_session(model="expert")

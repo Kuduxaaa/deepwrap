@@ -17,27 +17,160 @@ from typing import Any, Callable
 from deepwrap.function_calling import Tool
 
 
+# How much of the model's context one tool result may spend. The limit exists
+# for quality, not for cost: a single oversized dump pushes the task itself out
+# of the context window, and the agent then forgets what it was doing. Larger
+# output is kept in full on disk and summarized head-and-tail, so the model can
+# still page through it with read_file.
+MODEL_OUTPUT_CHARS = 8_000
+
+# Share of the budget spent on the beginning of a clipped output. Errors tend to
+# land at the end, so the tail is always kept too.
+OUTPUT_HEAD_SHARE = 0.6
+
+# Hard ceiling for a disk-backed log page, independent of the context budget.
 MAX_OUTPUT_CHARS = 1_000_000
 
+# WSL ships a bash that runs in a different filesystem, so a bash found here is
+# never the right shell for the project's working directory.
+_WSL_SHELL_MARKER = "system32"
 
-def _trim(value: str) -> tuple[str, bool]:
-    if len(value) <= MAX_OUTPUT_CHARS:
-        return value, False
-    return value[:MAX_OUTPUT_CHARS], True
+_WINDOWS_POSIX_SHELLS = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+)
 
 
 class NativeTools:
     """Built-in host command, code, search, and filesystem operations."""
 
-    def __init__(self, working_directory: str | Path | None = None, timeout: float = 30.0):
+    def __init__(
+        self,
+        working_directory: str | Path | None = None,
+        timeout: float = 30.0,
+        shell: str | None = None,
+        output_budget: int = MODEL_OUTPUT_CHARS,
+    ):
         self.working_directory = Path(working_directory or Path.cwd()).expanduser().resolve()
         self.timeout = timeout
+        self.output_budget = max(1_000, int(output_budget))
+        self.shell = self._resolve_shell(shell)
+        self.shell_is_posix = Path(self.shell).stem.lower() not in {"cmd", "powershell", "pwsh"}
         self._jobs_directory = Path(tempfile.mkdtemp(prefix="deepwrap-jobs-"))
+        self._outputs_directory = self._jobs_directory / "outputs"
         self._jobs: dict[str, dict[str, Any]] = {}
         self._jobs_lock = threading.RLock()
 
+    @staticmethod
+    def _resolve_shell(shell: str | None) -> str:
+        """Choose the shell commands run in, preferring a POSIX one.
+
+        Models write POSIX commands by default, so every `ls -la` against
+        `cmd.exe` is a wasted round and one more step of context drift. An
+        explicit `shell` argument or `DEEPWRAP_SHELL` always wins.
+        """
+
+        requested = shell or os.environ.get("DEEPWRAP_SHELL")
+        if requested:
+            return shutil.which(requested) or requested
+        if os.name != "nt":
+            return os.environ.get("SHELL") or "/bin/sh"
+        found = shutil.which("bash")
+        if found and _WSL_SHELL_MARKER not in found.lower():
+            return found
+        for candidate in _WINDOWS_POSIX_SHELLS:
+            if Path(candidate).is_file():
+                return candidate
+        return os.environ.get("COMSPEC") or "cmd.exe"
+
+    def _run(self, command: str, timeout: float | None) -> subprocess.CompletedProcess:
+        """Run a shell command through the resolved shell."""
+
+        if self.shell_is_posix:
+            argv: list[str] | str = [self.shell, "-c", command]
+            use_shell = False
+        else:
+            argv = command
+            use_shell = True
+        return subprocess.run(
+            argv,
+            cwd=self.working_directory,
+            shell=use_shell,
+            capture_output=True,
+            text=True,
+            timeout=timeout or self.timeout,
+            check=False,
+        )
+
+    def _capture(self, label: str, value: str) -> tuple[str, dict[str, Any]]:
+        """Clip an oversized stream for the model and keep all of it on disk."""
+
+        if len(value) <= self.output_budget:
+            return value, {}
+        self._outputs_directory.mkdir(parents=True, exist_ok=True)
+        path = self._outputs_directory / f"{label}-{uuid.uuid4().hex[:8]}.log"
+        path.write_text(value, encoding="utf-8", errors="replace")
+        head = int(self.output_budget * OUTPUT_HEAD_SHARE)
+        tail = self.output_budget - head
+        omitted = len(value) - head - tail
+        clipped = (
+            f"{value[:head]}\n"
+            f"[... {omitted} of {len(value)} characters omitted. "
+            f"Full output: {self._display_path(path)} "
+            f"- page through it with read_file offset/limit ...]\n"
+            f"{value[-tail:]}"
+        )
+        return clipped, {
+            f"{label}_full_path": self._display_path(path),
+            f"{label}_total_chars": len(value),
+        }
+
+    def environment_summary(self) -> str:
+        """Describe the host so the model stops guessing paths and shells."""
+
+        style = "windows" if os.name == "nt" else "posix"
+        syntax = "posix" if self.shell_is_posix else "cmd"
+        return (
+            f"os={sys.platform} path_style={style} "
+            f"shell={Path(self.shell).name.lower()} command_syntax={syntax} "
+            f"cwd={self.working_directory} "
+            f"max_output_chars={self.output_budget}"
+        )
+
+    @staticmethod
+    def _translate_shell_path(path: str) -> str:
+        """Map shell-style drive paths to native ones on Windows.
+
+        Commands run through a POSIX shell report paths such as /c/Users/me or
+        /cygdrive/c/Users/me. Passing those to pathlib on Windows would
+        silently resolve them under the current drive root instead of C:, so
+        they are normalized first.
+        """
+
+        if os.name != "nt":
+            return path
+        match = re.match(r"^/(?:cygdrive/|mnt/)?([A-Za-z])(?=/|$)(.*)$", path)
+        if match is None:
+            return path
+        drive, remainder = match.group(1), match.group(2)
+        return f"{drive.upper()}:{remainder or '/'}"
+
+    def _display_path(self, path: Path) -> str:
+        """Render a path relative to the working directory, POSIX style.
+
+        Match lines are the bulkiest tool output the model reads, and absolute
+        Windows paths waste tokens on every line while hiding the project
+        structure the model actually needs.
+        """
+
+        try:
+            return path.relative_to(self.working_directory).as_posix()
+        except ValueError:
+            return path.as_posix()
+
     def _path(self, path: str | Path) -> Path:
-        candidate = Path(path).expanduser()
+        candidate = Path(self._translate_shell_path(str(path))).expanduser()
         if not candidate.is_absolute():
             candidate = self.working_directory / candidate
         return candidate.resolve()
@@ -46,22 +179,17 @@ class NativeTools:
         """Execute a command through the operating system's default shell."""
 
         try:
-            completed = subprocess.run(
-                command,
-                cwd=self.working_directory,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout or self.timeout,
-                check=False,
-            )
-            stdout, stdout_truncated = _trim(completed.stdout)
-            stderr, stderr_truncated = _trim(completed.stderr)
+            completed = self._run(command, timeout)
+            stdout, stdout_info = self._capture("stdout", completed.stdout)
+            stderr, stderr_info = self._capture("stderr", completed.stderr)
             return {
                 "exit_code": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
-                "truncated": stdout_truncated or stderr_truncated,
+                "shell": Path(self.shell).name.lower(),
+                "truncated": bool(stdout_info or stderr_info),
+                **stdout_info,
+                **stderr_info,
             }
         except subprocess.TimeoutExpired as exc:
             return {
@@ -83,13 +211,15 @@ class NativeTools:
                 timeout=timeout or self.timeout,
                 check=False,
             )
-            stdout, stdout_truncated = _trim(completed.stdout)
-            stderr, stderr_truncated = _trim(completed.stderr)
+            stdout, stdout_info = self._capture("stdout", completed.stdout)
+            stderr, stderr_info = self._capture("stderr", completed.stderr)
             return {
                 "exit_code": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
-                "truncated": stdout_truncated or stderr_truncated,
+                "truncated": bool(stdout_info or stderr_info),
+                **stdout_info,
+                **stderr_info,
             }
         except subprocess.TimeoutExpired as exc:
             return {
@@ -116,7 +246,7 @@ class NativeTools:
         stderr_handle = stderr_path.open("wb")
         popen_kwargs: dict[str, Any] = {
             "cwd": cwd,
-            "shell": True,
+            "shell": not self.shell_is_posix,
             "stdout": stdout_handle,
             "stderr": stderr_handle,
             "stdin": subprocess.DEVNULL,
@@ -187,7 +317,7 @@ class NativeTools:
         job_id: str,
         stream: str = "stdout",
         offset: int = 0,
-        limit: int = 50_000,
+        limit: int | None = None,
     ) -> dict[str, Any]:
         """Read a bounded byte range from a running or completed job's logs."""
 
@@ -196,7 +326,8 @@ class NativeTools:
         record = self._job(job_id)
         path: Path = record[f"{stream}_path"]
         offset = max(0, offset)
-        limit = max(1, min(limit, 200_000))
+        resolved = self.output_budget if limit is None else limit
+        limit = max(1, min(resolved, MAX_OUTPUT_CHARS))
         with path.open("rb") as handle:
             handle.seek(offset)
             raw = handle.read(limit + 1)
@@ -256,7 +387,7 @@ class NativeTools:
         offset = max(0, offset)
         resolved_limit = 400 if limit is None else max(1, min(limit, 2000))
         selected = lines[offset : offset + resolved_limit]
-        content, truncated = _trim("".join(selected))
+        content, content_info = self._capture("content", "".join(selected))
         next_offset = offset + len(selected)
         return {
             "path": str(file_path),
@@ -266,7 +397,8 @@ class NativeTools:
             "lines_returned": len(selected),
             "has_more": next_offset < len(lines),
             "next_offset": next_offset if next_offset < len(lines) else None,
-            "truncated": truncated,
+            "truncated": bool(content_info),
+            **content_info,
         }
 
     def write_file(
@@ -339,11 +471,17 @@ class NativeTools:
             ]
             if not case_sensitive:
                 command.append("--ignore-case")
+            command.extend(["--path-separator", "/"])
             for item in glob or []:
                 command.extend(["--glob", item])
-            command.extend([pattern, str(search_path)])
+            try:
+                target = str(search_path.relative_to(self.working_directory)) or "."
+            except ValueError:
+                target = str(search_path)
+            command.extend([pattern, target])
             completed = subprocess.run(
                 command,
+                cwd=self.working_directory,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
@@ -387,7 +525,9 @@ class NativeTools:
                 continue
             for line_number, line in enumerate(lines, 1):
                 if regex.search(line):
-                    all_matches.append(f"{candidate}:{line_number}:{line}")
+                    all_matches.append(
+                        f"{self._display_path(candidate)}:{line_number}:{line}"
+                    )
                     if len(all_matches) >= target_count:
                         break
             if len(all_matches) >= target_count:
@@ -433,7 +573,7 @@ class NativeTools:
                 **object_schema, "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]
             }),
             Tool("job_output", "Read paginated stdout or stderr from a background job.", {
-                **object_schema, "properties": {"job_id": {"type": "string"}, "stream": {"type": "string", "enum": ["stdout", "stderr"], "default": "stdout"}, "offset": {"type": "integer", "default": 0}, "limit": {"type": "integer", "default": 50000, "maximum": 200000}}, "required": ["job_id"]
+                **object_schema, "properties": {"job_id": {"type": "string"}, "stream": {"type": "string", "enum": ["stdout", "stderr"], "default": "stdout"}, "offset": {"type": "integer", "default": 0}, "limit": {"type": "integer", "description": "Characters to return; defaults to the context-safe budget."}}, "required": ["job_id"]
             }),
             Tool("list_jobs", "List all background jobs owned by this DeepWrap client.", object_schema),
             Tool("stop_job", "Stop a running background job and its process tree.", {

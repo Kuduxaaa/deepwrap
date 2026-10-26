@@ -8,11 +8,24 @@ from unittest.mock import Mock
 from deepwrap import AgentResponse, AgentStream, Tool
 from deepwrap.api.chat_session import ChatSession
 from deepwrap.native_tools import NativeTools
+from deepwrap.planner import TaskPlan
 
 
 def tool_call(name, arguments):
     payload = json.dumps({"name": name, "arguments": arguments})
     return f"<deepwrap_tool_call>{payload}</deepwrap_tool_call>"
+
+
+def native_tool_call(name, arguments):
+    """Reproduce the backend's own tool markup that sometimes replaces ours."""
+
+    payload = json.dumps(arguments)
+    return (
+        f"<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name=\"{name}\"> "
+        f"<｜｜DSML｜｜ parameter name=\"arguments\" string=\"false\">"
+        f"{payload}</｜｜DSML｜｜ parameter> "
+        f"</｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>"
+    )
 
 
 class AgentAcceptanceTests(unittest.TestCase):
@@ -24,12 +37,22 @@ class AgentAcceptanceTests(unittest.TestCase):
         self.client.agent_mode = True
         self.client.max_agent_rounds = 8
         self.client.native_tools = NativeTools(self.root, timeout=2)
-        self.client.agent_tools = self.client.native_tools.definitions
-        self.client.agent_functions = self.client.native_tools.functions
+        self.client.plan = TaskPlan()
+        self.client.agent_tools = (
+            self.client.native_tools.definitions + self.client.plan.definitions
+        )
+        self.client.agent_functions = {
+            **self.client.native_tools.functions,
+            **self.client.plan.functions,
+        }
         self.chat = ChatSession(self.client, "session-id", "expert")
 
     def tearDown(self):
         self.directory.cleanup()
+
+    @staticmethod
+    def chat_event_messages(response):
+        return " ".join(event.message for event in response.events)
 
     def set_turns(self, *turns):
         pending = iter(turns)
@@ -132,7 +155,7 @@ class AgentAcceptanceTests(unittest.TestCase):
             ["42"],
         )
         self.chat.respond("calculate", stream=False)
-        self.assertIn("[DEEPWRAP TOOL RESULT]", prompts[1])
+        self.assertIn("[TOOL RESULT] exec_code", prompts[1])
         self.assertIn("42", prompts[1])
 
     def test_11_unknown_tool_becomes_recoverable_error(self):
@@ -150,15 +173,109 @@ class AgentAcceptanceTests(unittest.TestCase):
         self.assertFalse(response.tools_used[0].output["ok"])
         self.assertIn("FileNotFoundError", response.tools_used[0].output["error"])
 
-    def test_13_max_round_limit_stops_infinite_tool_loop(self):
+    def test_13_max_round_limit_asks_for_a_final_answer(self):
         self.client.max_agent_rounds = 2
+        rounds = []
 
         def endless_turns(prompt, **kwargs):
-            yield "response", tool_call("exec_code", {"code": "print('again')"})
+            rounds.append(prompt)
+            if len(rounds) > self.client.max_agent_rounds:
+                yield "response", "I stopped and here is what I found."
+            else:
+                yield "response", tool_call("exec_code", {"code": "print('again')"})
 
         self.chat.respond_structured = endless_turns
-        with self.assertRaisesRegex(RuntimeError, "exceeded 2 rounds"):
-            list(self.chat.respond("loop", stream=True))
+        response = self.chat.respond("loop", stream=False)
+        self.assertEqual(response, "I stopped and here is what I found.")
+        self.assertIn("limit", self.chat_event_messages(response).lower())
+        self.assertEqual(len(rounds), 3)
+
+    def test_13b_round_limit_is_unlimited_by_default(self):
+        self.client.max_agent_rounds = None
+        rounds = []
+
+        def many_turns(prompt, **kwargs):
+            rounds.append(prompt)
+            if len(rounds) > 12:
+                yield "response", "finished after many rounds"
+            else:
+                yield "response", tool_call(
+                    "exec_code", {"code": f"print({len(rounds)})"}
+                )
+
+        self.chat.respond_structured = many_turns
+        response = self.chat.respond("long task", stream=False)
+        self.assertEqual(response, "finished after many rounds")
+        self.assertEqual(len(response.tools_used), 12)
+
+    def test_13c_native_markup_tool_call_is_executed(self):
+        self.set_turns(
+            [native_tool_call("exec_code", {"code": "print('native')"})],
+            ["done"],
+        )
+        response = self.chat.respond("use native markup", stream=False)
+        self.assertEqual(response, "done")
+        self.assertEqual(response.tools_used[0].name, "exec_code")
+        self.assertEqual(response.tools_used[0].output["stdout"], "native\n")
+
+    def test_13d_leaked_markup_never_reaches_the_final_answer(self):
+        self.set_turns(
+            ["Here you go.\n" + native_tool_call("exec_code", {"code": "print(1)"})],
+            ["all done"],
+        )
+        response = self.chat.respond("mixed output", stream=False)
+        self.assertNotIn("DSML", response)
+        self.assertNotIn("invoke name", response)
+
+    def test_13e_repeated_identical_calls_get_a_loop_warning(self):
+        self.client.max_agent_rounds = 8
+        prompts = []
+
+        def repeating(prompt, **kwargs):
+            prompts.append(prompt)
+            if len(prompts) > 5:
+                yield "response", "stopping"
+            else:
+                yield "response", tool_call("exec_code", {"code": "print(1)"})
+
+        self.chat.respond_structured = repeating
+        self.chat.respond("repeat", stream=False)
+        self.assertTrue(
+            any("same tool call" in prompt.lower() for prompt in prompts),
+            prompts,
+        )
+
+    def test_13f_an_endlessly_repeating_agent_still_terminates(self):
+        self.client.max_agent_rounds = None
+        rounds = []
+
+        def always_the_same(prompt, **kwargs):
+            rounds.append(prompt)
+            if "Do not call any more tools" in prompt:
+                yield "response", "I kept repeating one check; here is what I know."
+            else:
+                yield "response", tool_call("exec_code", {"code": "print(1)"})
+
+        self.chat.respond_structured = always_the_same
+        response = self.chat.respond("spin forever", stream=False)
+        self.assertEqual(response, "I kept repeating one check; here is what I know.")
+        self.assertLess(len(rounds), 10)
+
+    def test_13g_unparseable_syntax_is_not_retried_forever(self):
+        self.client.max_agent_rounds = None
+        rounds = []
+
+        def never_valid(prompt, **kwargs):
+            rounds.append(prompt)
+            yield "response", (
+                "The envelope looks like "
+                '<deepwrap_tool_call>{"name":}</deepwrap_tool_call> in general.'
+            )
+
+        self.chat.respond_structured = never_valid
+        response = self.chat.respond("explain the syntax", stream=False)
+        self.assertEqual(len(rounds), 3)
+        self.assertIn("The envelope looks like", response)
 
     def test_14_agent_can_execute_system_command(self):
         response = self.run_single_tool("exec", {"command": "printf agent-ok"})
@@ -224,6 +341,59 @@ class AgentAcceptanceTests(unittest.TestCase):
         self.assertIn("tool_started", [event.type for event in response.events])
         self.assertIn("tool_completed", [event.type for event in response.events])
         self.assertIn("thinking", [event.type for event in response.events])
+
+
+    def test_21_agent_can_write_and_advance_a_plan(self):
+        self.set_turns(
+            [tool_call("set_plan", {"steps": ["Read it", "Patch it", "Verify"]})],
+            [tool_call("update_plan", {"step": 1, "status": "done"})],
+            ["Plan started."],
+        )
+        response = self.chat.respond("do the multi-step task", stream=False)
+
+        plan = response.tools_used[1].output
+        self.assertEqual(plan["done"], 1)
+        self.assertEqual(plan["current"], "Patch it")
+        self.assertEqual(self.client.plan.get_plan()["total"], 3)
+
+    def test_22_progress_recap_replays_the_task_and_plan(self):
+        self.client.plan.set_plan(["Read it", "Patch it"])
+        prompts = []
+
+        def five_rounds(prompt, **kwargs):
+            prompts.append(prompt)
+            if len(prompts) > 5:
+                yield "response", "done"
+            else:
+                yield "response", tool_call(
+                    "exec_code", {"code": f"print({len(prompts)})"}
+                )
+
+        self.chat.respond_structured = five_rounds
+        self.chat.respond("investigate the parser", stream=False)
+
+        recaps = [item for item in prompts if "[DEEPWRAP PROGRESS]" in item]
+        self.assertEqual(len(recaps), 1)
+        self.assertIn("TASK: investigate the parser", recaps[0])
+        self.assertIn("[>] 1. Read it", recaps[0])
+        self.assertIn("exec_code: ok", recaps[0])
+
+    def test_23_recap_is_announced_as_an_event(self):
+        prompts = []
+
+        def five_rounds(prompt, **kwargs):
+            prompts.append(prompt)
+            if len(prompts) > 5:
+                yield "response", "done"
+            else:
+                yield "response", tool_call(
+                    "exec_code", {"code": f"print({len(prompts)})"}
+                )
+
+        self.chat.respond_structured = five_rounds
+        response = self.chat.respond("long investigation", stream=False)
+
+        self.assertIn("recap", [event.type for event in response.events])
 
 
 if __name__ == "__main__":

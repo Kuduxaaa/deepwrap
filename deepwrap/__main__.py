@@ -293,7 +293,7 @@ def api_command(
     "--god/--no-god",
     default=False,
     show_default=True,
-    help="Enable or disable God Mode for this chat session.",
+    help="Enable or disable direct answer mode for this chat session.",
 )
 @click.option(
     "--stream/--no-stream",
@@ -377,7 +377,7 @@ def config_command() -> None:
             click.echo(f"Search enabled: {'yes' if config.search_enabled else 'no'}")
 
         if hasattr(config, "god_mode"):
-            click.echo(f"God Mode: {'yes' if config.god_mode else 'no'}")
+            click.echo(f"Direct mode: {'yes' if config.god_mode else 'no'}")
 
     except Exception as exc:
         raise DeepWrapCLIError(f"Failed to read config: {exc}") from exc

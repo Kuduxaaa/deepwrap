@@ -24,6 +24,18 @@ class MemoryStore:
         self._connection.row_factory = sqlite3.Row
         self._initialize()
 
+    def close(self) -> None:
+        """Release the SQLite connection held for the lifetime of the store."""
+
+        with self._lock:
+            self._connection.close()
+
+    def __enter__(self) -> "MemoryStore":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
     def _initialize(self) -> None:
         with self._lock, self._connection:
             self._connection.executescript(
@@ -122,7 +134,7 @@ class MemoryStore:
                     FROM memories_fts
                     JOIN memories m ON m.id = memories_fts.id
                     WHERE memories_fts MATCH ? AND m.namespace = ?
-                    ORDER BY lexical_score, m.importance DESC, m.updated_at DESC
+                    ORDER BY lexical_score, m.importance DESC, m.updated_at DESC, m.rowid DESC
                     LIMIT ?
                     """,
                     (query, self.namespace, limit),
@@ -132,7 +144,7 @@ class MemoryStore:
                     """
                     SELECT * FROM memories
                     WHERE namespace = ? AND content LIKE ?
-                    ORDER BY importance DESC, updated_at DESC LIMIT ?
+                    ORDER BY importance DESC, updated_at DESC, rowid DESC LIMIT ?
                     """,
                     (self.namespace, f"%{query}%", limit),
                 ).fetchall()
@@ -141,7 +153,7 @@ class MemoryStore:
     def list(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM memories WHERE namespace = ? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM memories WHERE namespace = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?",
                 (self.namespace, max(1, min(limit, 500))),
             ).fetchall()
         return [self._row(row) for row in rows]
@@ -149,7 +161,7 @@ class MemoryStore:
     def get_priority_memories(self, limit: int = 20, min_importance: float = 0.9) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM memories WHERE namespace = ? AND importance >= ? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM memories WHERE namespace = ? AND importance >= ? ORDER BY updated_at DESC, rowid DESC LIMIT ?",
                 (self.namespace, min_importance, limit),
             ).fetchall()
         return [self._row(row) for row in rows]
@@ -224,7 +236,7 @@ class MemoryStore:
     def list_sessions(self, limit: int = 20) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM sessions WHERE namespace = ? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT * FROM sessions WHERE namespace = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?",
                 (self.namespace, max(1, min(limit, 100))),
             ).fetchall()
         return [dict(row) for row in rows]

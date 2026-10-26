@@ -22,7 +22,7 @@
   - [Vision File Uploads](#vision-file-uploads)
   - [Pseudo Function Calling](#pseudo-function-calling)
 - [Supported Models](#supported-models)
-- [God Mode](#god-mode)
+- [Direct Mode](#direct-mode)
   - [Python SDK](#python-sdk)
 - [CLI Usage](#cli-usage)
 - [Interactive CLI Commands](#interactive-cli-commands)
@@ -292,6 +292,9 @@ tools that the model can call repeatedly before returning its final answer:
 - `job_output` — read paginated stdout or stderr while a job runs.
 - `list_jobs` — list jobs owned by the current client.
 - `stop_job` — terminate a job and its process group.
+- `set_plan` — write down an ordered plan before multi-step work.
+- `update_plan` — mark a step done, in progress, or blocked.
+- `get_plan` — read the plan and how much of it is finished.
 
 ```python
 from pathlib import Path
@@ -301,7 +304,9 @@ from deepwrap import Client
 client = Client(
     working_directory=Path.cwd(),
     command_timeout=30,
-    max_agent_rounds=8,
+    max_agent_rounds=None,  # None means no limit; an int caps the tool rounds
+    output_budget=8_000,    # characters of one tool result the model may see
+    shell=None,             # None auto-detects; "cmd.exe", "bash", "zsh", ...
 )
 chat = client.chats.create_session(model="expert")
 
@@ -419,14 +424,115 @@ and feeds the visual analysis back into the current conversation. Manual
 `/model vision` and `/attach` remain useful when several follow-up prompts should
 reuse the same uploaded image.
 
-Thinking output works in agent mode as well as plain mode. Enabling or disabling
-God Mode updates the current session in place, so conversation and image context
-are preserved.
+Thinking output works in agent mode as well as plain mode. The live thinking
+panel shows the newest lines when a thought is taller than the terminal, instead
+of freezing at the top until generation ends. Enabling or disabling Direct Mode
+updates the current session in place, so conversation and image context are
+preserved.
 
 For large repositories, `grep` and `read_file` return bounded pages with
 `has_more` and `next_offset`. The agent protocol instructs the model to search
 broadly, narrow relevant files, and follow pagination instead of flooding its
-context with entire projects.
+context with entire projects. `grep` reports paths relative to the working
+directory with forward slashes on every platform.
+
+#### Tool rounds
+
+`max_agent_rounds` defaults to `None`, so the agent keeps calling tools until the
+task is finished. Long refactors and multi-file investigations are no longer cut
+off part-way with a `RuntimeError`.
+
+Set an integer to cap the work. Reaching the cap is not an error either: the
+agent is asked for a final answer with whatever it has, reports what is still
+unfinished, and the round limit is announced through a `limit_reached` event.
+
+A model that issues the same call with the same arguments three times in a row
+is told it is looping and asked to change approach or answer. After six, it is
+made to answer, so an unlimited loop still terminates without `Ctrl+C`.
+
+#### Context budget
+
+The agent's real limit is the context window, not the number of rounds. One
+unbounded `exec` or `read_file` can push the task itself out of the window,
+after which the model forgets what it was doing.
+
+So every tool result is capped at `output_budget` characters (8000 by default).
+Larger output is written to a file in full and handed to the model as its head
+and tail with a pointer:
+
+```json
+{
+  "stdout": "first 4800 characters\n[... 12013 of 20013 characters omitted. Full output: ... ]\nlast 3200 characters",
+  "truncated": true,
+  "stdout_full_path": "…/outputs/stdout-7f1dca9e.log",
+  "stdout_total_chars": 20013
+}
+```
+
+The tail is always kept, because that is where errors land, and the model can
+page through the whole file with `read_file` when it needs more.
+
+#### Progress recaps
+
+Every fourth tool round, the agent is sent a compact recap: the original
+request, the current plan, and the outcome of the last few tool calls. Without
+it, a long loop pushes the request so far back that the model starts answering a
+task it half-remembers. The CLI shows the recap as a dim notice.
+
+#### Plans
+
+For anything longer than about three tool calls, the model is asked to call
+`set_plan` first and to keep it current with `update_plan`. The plan is tool
+state, not prose, so it survives in the recap and is rendered as a checklist in
+the CLI:
+
+```text
+  plan (1/3)
+    ✓ Locate the parser entry point
+    ▸ Add the fallback branch
+    ○ Run the test suite
+```
+
+#### Shell
+
+Models write POSIX commands by default, so every `ls -la` sent to `cmd.exe`
+costs a round and a step of context drift. DeepWrap therefore prefers a POSIX
+shell when one exists, including Git Bash on Windows, and never picks the WSL
+`bash` in `System32`, which would run in a different filesystem.
+
+Set `shell=` on the client or `DEEPWRAP_SHELL` in the environment to force one.
+The resolved shell and its command syntax are declared to the model, together
+with the OS, working directory, and output budget.
+
+#### Tool-call syntax recovery
+
+Tool calls are expected in the DeepWrap envelope:
+
+```text
+<deepwrap_tool_call>{"name":"exec","arguments":{"command":"pwd"}}</deepwrap_tool_call>
+```
+
+Backends sometimes fall back to their own native markup instead. DeepWrap parses
+those forms as well, so the call is executed rather than printed as raw text, and
+markup never reaches the user's screen mid-stream. Markup that cannot be parsed
+at all is reported back to the model with the correct syntax, and the turn is
+retried instead of being shown as the answer.
+
+#### Prompt cost
+
+The chat session keeps history server side, so the full protocol and every tool
+schema are sent only once per session, or again when the registered tools change.
+Later messages carry a 192-character reminder instead of a 4.5 KB protocol
+block, and tool results are serialized without boilerplate:
+
+| Payload                    | Before  | After   |
+| -------------------------- | ------- | ------- |
+| First message of a session | 5621 ch | 4514 ch |
+| Every later message        | 5621 ch | 192 ch  |
+| Every tool result          | 229 ch  | 85 ch   |
+
+The protocol also states the host OS, shell, working directory, and path style,
+which stops the model from guessing POSIX paths on Windows.
 
 > Agent mode executes model-generated commands and code and can read or modify any
 > path available to the current operating-system user. Run it only in an environment
@@ -522,17 +628,21 @@ Example:
 chat = client.chats.create_session(model="default")
 ```
 
-## God Mode
+## Direct Mode
 
-DeepWrap includes an optional **God Mode** for chat sessions.
+DeepWrap includes an optional **Direct Mode** for chat sessions.
 
-When `god_mode` is enabled, DeepWrap injects a one-time override prompt into the first user turn of the session. This prompt attempts to alter the model’s default behavior by making it less restricted and reducing the effect of built-in safety guardrails.
+When `god_mode` is enabled, DeepWrap prepends a one-time style directive to the
+first user turn of the session. It asks for dense, senior-engineer answers: the
+answer first, concrete commands and numbers, no preamble, no filler, no
+unsolicited disclaimers, and the user's own language.
 
-This can materially change the model’s behavior and may cause it to generate content that is harmful, unethical, inappropriate, or unsuitable for general use.
+It is a response-style directive, not a restriction bypass, and it is also the
+cheapest knob in the library: shorter answers with a higher share of useful
+content per token.
 
-Because this mode is implemented through prompt injection at the start of a session, its behavior is intentionally intrusive and may diverge from normal model behavior. It should only be used in controlled development and research environments.
-
-> God Mode is disabled by default and must be enabled explicitly per session.
+> Direct Mode is disabled by default and must be enabled explicitly per session.
+> The flag keeps its historical `god_mode` name for backwards compatibility.
 
 ### Python SDK
 
@@ -547,7 +657,7 @@ chat = client.chats.create_session(
 )
 
 response = chat.respond(
-    "Give me a blunt explanation of Python metaclasses.",
+    "Explain Python metaclasses, briefly and concretely.",
     stream=False,
 )
 
@@ -628,7 +738,7 @@ Inside the interactive terminal UI:
 /token "<token>"   Set token inline
 /thinking on|off   Show or hide thinking blocks
 /search on|off     Enable or disable search
-/god on|off        Enable or disable God Mode
+/god on|off        Enable or disable Direct Mode
 /save              Save current settings
 /status            Show current session status
 ```

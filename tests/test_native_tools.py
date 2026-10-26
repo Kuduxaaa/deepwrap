@@ -151,5 +151,60 @@ class NativeToolsTests(unittest.TestCase):
         self.assertNotEqual(stopped["state"], "running")
 
 
+class OutputBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.tools = NativeTools(self.directory.name, timeout=20, output_budget=2000)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_oversized_output_is_clipped_for_the_model(self):
+        result = self.tools.exec_code("print('A' * 20000)")
+
+        self.assertTrue(result["truncated"])
+        self.assertLess(len(result["stdout"]), 2500)
+        self.assertEqual(result["stdout_total_chars"], 20001)
+
+    def test_clipped_output_keeps_the_end_where_errors_land(self):
+        result = self.tools.exec_code(
+            "print('A' * 20000); print('FINAL-LINE-MATTERS')"
+        )
+
+        self.assertIn("FINAL-LINE-MATTERS", result["stdout"])
+        self.assertIn("characters omitted", result["stdout"])
+
+    def test_full_output_stays_readable_on_disk(self):
+        result = self.tools.exec_code("print('A' * 20000)")
+        spilled = Path(result["stdout_full_path"])
+
+        self.assertTrue(spilled.is_file())
+        self.assertEqual(len(spilled.read_text(encoding="utf-8")), 20001)
+
+    def test_small_output_is_untouched(self):
+        result = self.tools.exec_code("print('small')")
+
+        self.assertEqual(result["stdout"], "small\n")
+        self.assertFalse(result["truncated"])
+        self.assertNotIn("stdout_full_path", result)
+
+    def test_read_file_reports_the_shell_syntax_it_runs(self):
+        summary = self.tools.environment_summary()
+
+        self.assertIn("command_syntax=", summary)
+        self.assertIn(f"max_output_chars={self.tools.output_budget}", summary)
+
+    def test_an_explicit_shell_is_honoured(self):
+        tools = NativeTools(self.directory.name, shell="cmd.exe")
+
+        self.assertIn("cmd", Path(tools.shell).name.lower())
+        self.assertFalse(tools.shell_is_posix)
+
+    def test_wsl_bash_is_never_chosen_automatically(self):
+        resolved = NativeTools._resolve_shell(None)
+
+        self.assertNotIn("system32", resolved.lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,9 +10,10 @@ from deepwrap.api import ChatsAPI, FilesAPI, PowAPI
 from deepwrap.api.chat_session import ChatSession
 from deepwrap.utils.config_store import ConfigStore
 from deepwrap.utils.bearer_token_extractor import BearerTokenExtractor
-from deepwrap.native_tools import NativeTools
+from deepwrap.native_tools import MODEL_OUTPUT_CHARS, NativeTools
 from deepwrap.function_calling import Tool
 from deepwrap.memory import MemoryStore
+from deepwrap.planner import TaskPlan
 from deepwrap.project_intelligence import ProjectIntelligence
 
 class Client:
@@ -36,7 +37,9 @@ class Client:
         agent_mode: bool = True,
         working_directory: Optional[str | Path] = None,
         command_timeout: float = 30.0,
-        max_agent_rounds: int = 8,
+        shell: Optional[str] = None,
+        output_budget: int = MODEL_OUTPUT_CHARS,
+        max_agent_rounds: Optional[int] = None,
         memory_enabled: bool = True,
         memory_path: Optional[str | Path] = None,
         memory_namespace: str = "default",
@@ -63,6 +66,8 @@ class Client:
         self.native_tools = NativeTools(
             working_directory=working_directory,
             timeout=command_timeout,
+            shell=shell,
+            output_budget=output_budget,
         )
         self._custom_tools: dict[str, tuple[Tool, Callable[..., Any]]] = {}
         self.memory = (
@@ -79,6 +84,7 @@ class Client:
             project_root,
             ConfigStore().path.parent / "projects" / f"{project_key}.json",
         )
+        self.plan = TaskPlan()
 
         self._resume_session_id = resume_session_id
         self._resume_claimed = False
@@ -97,6 +103,21 @@ class Client:
         self._conversations: dict[str, ChatSession] = {}
         self._responses: dict[str, str]             = {}
         self._loaded_sessions: set[str]             = set()
+
+    def close(self) -> None:
+        """Release the memory database and HTTP session held by this client."""
+
+        if self.memory is not None:
+            self.memory.close()
+        session = getattr(self.session, "session", None)
+        if session is not None and hasattr(session, "close"):
+            session.close()
+
+    def __enter__(self) -> "Client":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def register_tool(
         self,
@@ -117,8 +138,12 @@ class Client:
     @property
     def agent_tools(self) -> tuple[Tool, ...]:
         memory_tools = self.memory.definitions if self.memory is not None else ()
-        return self.native_tools.definitions + memory_tools + self.project.definitions + tuple(
-            item[0] for item in self._custom_tools.values()
+        return (
+            self.native_tools.definitions
+            + memory_tools
+            + self.project.definitions
+            + self.plan.definitions
+            + tuple(item[0] for item in self._custom_tools.values())
         )
 
     @property
@@ -127,6 +152,7 @@ class Client:
         if self.memory is not None:
             functions.update(self.memory.functions)
         functions.update(self.project.functions)
+        functions.update(self.plan.functions)
         functions.update(
             {name: item[1] for name, item in self._custom_tools.items()}
         )

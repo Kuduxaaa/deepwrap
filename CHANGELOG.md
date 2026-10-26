@@ -9,6 +9,81 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Tolerant tool-call parsing: native backend markup and a lone JSON call object
+  are executed instead of being printed to the user as raw text.
+- Automatic recovery round when tool markup cannot be parsed, with the correct
+  syntax sent back to the model.
+- Streaming markup guard, so a turn that switches to tool markup mid-answer is
+  never partially printed.
+- Loop detection that tells the model when it repeats an identical tool call,
+  and makes it answer after six identical calls so unlimited rounds still
+  terminate.
+- A two-attempt cap on tool-syntax recovery, after which the message is treated
+  as the answer.
+- `limit_reached` and `recovering` agent events.
+- Host environment line (OS, shell, working directory, path style) in the tool
+  protocol, and translation of shell-style drive paths such as `/c/Users` on
+  Windows.
+- `MemoryStore.close()`, `Client.close()`, and context-manager support for both.
+- Task plans: `set_plan`, `update_plan`, and `get_plan` tools, rendered as a
+  checklist in the CLI and replayed in every progress recap.
+- Progress recaps every fourth tool round, restating the request, the plan, and
+  the latest tool outcomes so a long loop cannot drift off the task.
+- A per-result context budget: tool output over `output_budget` characters
+  (8000 by default) is written to a file in full and passed to the model as its
+  head and tail with a pointer, instead of spending the whole context window.
+- Shell resolution that prefers a POSIX shell, including Git Bash on Windows,
+  skips the WSL `bash` in `System32`, and is overridable with `shell=` or
+  `DEEPWRAP_SHELL`. `exec` reports which shell ran the command.
+- `Client(shell=..., output_budget=...)`.
+- `ThinkingView` in the CLI, plus tests for panel height and Markdown flushing.
+
+### Changed
+
+- `max_agent_rounds` now defaults to `None`, meaning unlimited tool rounds.
+  Reaching an explicit limit asks the model for a final answer instead of
+  raising `RuntimeError`.
+- Agent requests send the full tool protocol and schemas once per session, or
+  again when the registered tools change, and a 192-character reminder
+  afterwards. Later messages shrink from 5621 to 192 characters, the first
+  message from 5621 to 4514, and each tool result from 229 to 85.
+- The tool protocol and tool-result envelopes were rewritten to be denser.
+- God Mode is now Direct Mode: a response-style directive for terse,
+  high-density expert answers. The previous override prompt, which asked the
+  model to ignore its safety guidelines, was removed. The `god_mode` flag name
+  is unchanged.
+- The CLI thinking panel renders only the lines that fit the terminal, so long
+  thinking stays visible instead of freezing at the top until generation ends.
+- Long Markdown blocks are flushed at a line break instead of waiting for the
+  blank line that ends them. Lists, tables, headings, and quotes are untouched.
+- Failed tools are shown with a red mark in the CLI instead of a green check.
+- `grep` reports paths relative to the working directory, POSIX style, on every
+  platform.
+- Memory queries break ties by insertion order, making results deterministic.
+- `job_output` defaults to the context budget instead of 50000 characters.
+- The CLI prints `limit_reached`, `recovering`, and `recap` notices instead of
+  silently dropping them once the spinner has stopped.
+
+### Fixed
+
+- Raw `DSML` tool markup leaking into the terminal as the final answer.
+- Generation aborting with `Tool-call loop exceeded 8 rounds.` part-way through
+  a task.
+- Long thinking and long answers staying invisible until generation finished on
+  short terminals.
+- `write_file` and the other file tools resolving POSIX paths from shell output
+  to the wrong Windows location.
+- SQLite handles kept open by `MemoryStore`, which blocked temporary directory
+  cleanup on Windows.
+- A single large tool result filling the context window and making the agent
+  lose the task it was given.
+- POSIX commands being sent to `cmd.exe` on Windows, which wasted a tool round
+  on every attempt.
+
+## [0.2.3]
+
+### Added
+
 - Default integrated agent mode with autonomous multi-round native tool usage.
 - Built-in `exec`, `grep`, `read_file`, `write_file`, `edit_file`, and
   `exec_code` tools.

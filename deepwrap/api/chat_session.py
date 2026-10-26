@@ -14,15 +14,79 @@ from deepwrap.function_calling import (
     ToolCall,
     ToolResponse,
     ToolExecution,
+    build_final_answer_request,
+    build_loop_warning,
+    build_malformed_call_notice,
+    build_progress_recap,
     build_tool_prompt,
+    build_tool_reminder,
     build_tool_result,
     execute_tool_call,
+    looks_like_tool_call,
     parse_tool_calls,
+    strip_tool_markup,
 )
 
 
 ChunkKind = Literal["think", "response"]
-AGENT_STREAM_DECISION_CHARS = 4096
+
+# How much of a turn is buffered before deciding that it is a plain answer and
+# can be streamed. Tool calls start at the first character, so a short prefix is
+# enough, and a short prefix is what keeps the CLI feeling live.
+AGENT_STREAM_DECISION_CHARS = 1024
+
+# Identical tool calls tolerated before the model is told it is looping.
+AGENT_REPEAT_LIMIT = 3
+
+# Identical tool calls tolerated before the agent is made to answer. Rounds are
+# unlimited by default, so a model stuck on one call still has to terminate.
+AGENT_STUCK_LIMIT = 6
+
+# Attempts at talking a model out of an unparseable tool-call syntax before its
+# message is simply treated as the answer.
+AGENT_RECOVERY_LIMIT = 2
+
+# Tool rounds between progress recaps. Tool results push the original request
+# out of the model's view, so it is restated periodically.
+AGENT_RECAP_INTERVAL = 4
+
+
+class _MarkupGuard:
+    """Hold back streamed text until it is known to be free of tool markup.
+
+    The backend sometimes abandons the DeepWrap envelope mid-turn and emits its
+    own native tool markup instead. Streaming that straight to the user is what
+    made raw `invoke name=...` blocks show up in the terminal, so a small tail is
+    withheld until the next chunk proves it is ordinary text.
+    """
+
+    HOLD_CHARS = 64
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self.tripped = False
+
+    def feed(self, text: str) -> str:
+        if self.tripped:
+            return ""
+        self._pending += text
+        if looks_like_tool_call(self._pending):
+            self.tripped = True
+            boundary = self._pending.find("<")
+            safe = self._pending[:boundary] if boundary > 0 else ""
+            self._pending = ""
+            return safe
+        if len(self._pending) <= self.HOLD_CHARS:
+            return ""
+        safe = self._pending[: -self.HOLD_CHARS]
+        self._pending = self._pending[-self.HOLD_CHARS :]
+        return safe
+
+    def finish(self) -> str:
+        if self.tripped:
+            return ""
+        pending, self._pending = self._pending, ""
+        return pending
 
 
 class ChatSession(BaseAPI):
@@ -54,7 +118,7 @@ class ChatSession(BaseAPI):
                 The model bound to this chat session, such as "expert" or
                 "default".
             god_mode:
-                Whether to enable god mode for this session.
+                Whether to enable direct answer mode for this session.
         """
 
         super().__init__(client)
@@ -64,6 +128,7 @@ class ChatSession(BaseAPI):
         self.god_mode               = god_mode
         self._is_god_mode_triggered = False
         self._last_message_id       = None
+        self._tool_protocol_hash    = None
         self.memory_session_id      = client._claim_memory_session(model_type)
 
     @staticmethod
@@ -381,6 +446,25 @@ class ChatSession(BaseAPI):
             )
         )
 
+    def _agent_message(self, prompt: str, tools: Sequence[Tool]) -> str:
+        """Prepend the tool protocol, in full once per tool set per session.
+
+        The full protocol with every tool schema is the single most expensive
+        part of an agent request. The chat session keeps history server side, so
+        later messages only need a short reminder, and the schemas are resent
+        only when the available tools actually change.
+        """
+
+        signature = tuple(tool.name for tool in tools)
+        if self._tool_protocol_hash == signature:
+            return build_tool_reminder(prompt, tools)
+        self._tool_protocol_hash = signature
+        environment = None
+        native_tools = getattr(self._client, "native_tools", None)
+        if native_tools is not None and hasattr(native_tools, "environment_summary"):
+            environment = native_tools.environment_summary()
+        return build_tool_prompt(prompt, tools, environment=environment)
+
     def _agent_stream(
         self,
         prompt: str,
@@ -408,6 +492,20 @@ class ChatSession(BaseAPI):
                     import sys
                     print(f"Error in agent event handler: {exc}", file=sys.stderr)
 
+        def remember(answer: str) -> None:
+            if self._client.memory is not None and self.memory_session_id:
+                self._client.memory.add_turn(self.memory_session_id, "user", prompt)
+                self._client.memory.add_turn(self.memory_session_id, "assistant", answer)
+
+        def complete(answer: str) -> None:
+            remember(answer)
+            emit(
+                AgentEvent(
+                    "completed",
+                    "Agent completed the task.",
+                    duration_seconds=time.monotonic() - started_at,
+                )
+            )
 
         def generate() -> Generator[str, None, None]:
             emit(AgentEvent("started", "Agent started; preparing the task."))
@@ -416,21 +514,46 @@ class ChatSession(BaseAPI):
                 self.memory_session_id,
             )
             memory_prefix = f"{memory_context}\n\n" if memory_context else ""
-            message = build_tool_prompt(memory_prefix + prompt, tools)
-            for round_index in range(self._client.max_agent_rounds):
-                emit(
-                    AgentEvent(
-                        "planning",
-                        f"Planning agent step {round_index + 1}.",
+            message = self._agent_message(memory_prefix + prompt, tools)
+
+            round_index = 0
+            first_round = True
+            force_final = False
+            stuck = False
+            recoveries = 0
+            repeats: dict[str, int] = {}
+
+            while True:
+                limit = self._client.max_agent_rounds
+                exhausted = limit is not None and round_index >= limit
+                if (exhausted or stuck) and not force_final:
+                    force_final = True
+                    reason = (
+                        f"Tool-round limit ({limit}) reached"
+                        if exhausted
+                        else "The agent stopped making progress"
                     )
-                )
+                    emit(
+                        AgentEvent(
+                            "limit_reached",
+                            f"{reason}; asking for a final answer.",
+                        )
+                    )
+                    message = build_final_answer_request(
+                        limit if exhausted else round_index
+                    )
+
+                round_index += 1
+                emit(AgentEvent("planning", f"Planning agent step {round_index}."))
+
                 response = ""
-                is_final = False
+                guard = _MarkupGuard()
+                streaming = False
                 for kind, chunk in self.respond_structured(
                     message,
                     thinking=thinking,
                     search=search,
-                    ref_file_ids=ref_file_ids if round_index == 0 else None,
+                    ref_file_ids=ref_file_ids if first_round else None,
                 ):
                     if kind == "think":
                         if thinking:
@@ -439,48 +562,73 @@ class ChatSession(BaseAPI):
                     if kind != "response":
                         continue
                     response += chunk
+                    if streaming:
+                        safe = guard.feed(chunk)
+                        if safe:
+                            yield safe
+                        continue
                     if (
-                        not is_final
-                        and len(response) >= AGENT_STREAM_DECISION_CHARS
-                        and "<deepwrap_tool_call>" not in response
+                        len(response) >= AGENT_STREAM_DECISION_CHARS
+                        and not looks_like_tool_call(response)
                     ):
-                        is_final = True
+                        streaming = True
                         emit(AgentEvent("responding", "Streaming the final response."))
-                        yield response
-                    elif is_final:
-                        yield chunk
+                        safe = guard.feed(response)
+                        if safe:
+                            yield safe
+
+                first_round = False
 
                 if not response.strip():
                     emit(AgentEvent("completed", "Agent completed with an empty response."))
                     return
 
-                calls = parse_tool_calls(response)
-                if is_final:
-                    if self._client.memory is not None and self.memory_session_id:
-                        self._client.memory.add_turn(self.memory_session_id, "user", prompt)
-                        self._client.memory.add_turn(self.memory_session_id, "assistant", response)
+                try:
+                    calls = parse_tool_calls(response, known_names=known_names)
+                    parse_error = None
+                except ValueError as exc:
+                    calls, parse_error = (), str(exc)
+
+                if streaming and not guard.tripped:
+                    tail = guard.finish()
+                    if tail:
+                        yield tail
+                    complete(response)
+                    return
+
+                if calls and not force_final:
+                    unparsed = False
+                else:
+                    unparsed = parse_error is not None or (
+                        not calls and looks_like_tool_call(response)
+                    )
+
+                if unparsed and not force_final and recoveries < AGENT_RECOVERY_LIMIT:
+                    recoveries += 1
                     emit(
                         AgentEvent(
-                            "completed",
-                            "Agent completed the task.",
-                            duration_seconds=time.monotonic() - started_at,
+                            "recovering",
+                            "The model used an unsupported tool-call syntax; "
+                            "asking it to retry.",
                         )
                     )
+                    message = build_malformed_call_notice(parse_error)
+                    continue
+
+                if not calls or force_final:
+                    answer = strip_tool_markup(response)
+                    if answer:
+                        emit(AgentEvent("responding", "Streaming the final response."))
+                        yield answer
+                    complete(answer)
                     return
-                if not calls:
-                    emit(AgentEvent("responding", "Streaming the final response."))
-                    yield response
-                    if self._client.memory is not None and self.memory_session_id:
-                        self._client.memory.add_turn(self.memory_session_id, "user", prompt)
-                        self._client.memory.add_turn(self.memory_session_id, "assistant", response)
-                    emit(
-                        AgentEvent(
-                            "completed",
-                            "Agent completed the task.",
-                            duration_seconds=time.monotonic() - started_at,
-                        )
-                    )
-                    return
+
+                signature = json.dumps(
+                    [[call.name, call.arguments] for call in calls],
+                    sort_keys=True,
+                    default=str,
+                )
+                repeats[signature] = repeats.get(signature, 0) + 1
 
                 result_messages: list[str] = []
                 for call in calls:
@@ -517,11 +665,32 @@ class ChatSession(BaseAPI):
                         )
                     )
                     result_messages.append(build_tool_result(call, output))
-                message = "\n\n".join(result_messages)
 
-            raise RuntimeError(
-                f"Tool-call loop exceeded {self._client.max_agent_rounds} rounds."
-            )
+                if repeats[signature] >= AGENT_REPEAT_LIMIT:
+                    result_messages.append(
+                        build_loop_warning(calls[0], repeats[signature])
+                    )
+                if repeats[signature] >= AGENT_STUCK_LIMIT:
+                    stuck = True
+                if round_index % AGENT_RECAP_INTERVAL == 0:
+                    plan = getattr(self._client, "plan", None)
+                    plan_summary = (
+                        plan.summary() if hasattr(plan, "summary") else ""
+                    )
+                    result_messages.append(
+                        build_progress_recap(
+                            prompt,
+                            plan_summary if isinstance(plan_summary, str) else "",
+                            tools_used,
+                        )
+                    )
+                    emit(
+                        AgentEvent(
+                            "recap",
+                            "Restating the task and plan so they stay in context.",
+                        )
+                    )
+                message = "\n\n".join(result_messages)
 
         return AgentStream(generate(), tools_used, events)
 
@@ -556,6 +725,7 @@ class ChatSession(BaseAPI):
 
         known_names = {tool.name for tool in tools}
         message = build_tool_prompt(prompt, tools)
+        self._tool_protocol_hash = tuple(tool.name for tool in tools)
         call_history: list[ToolCall] = []
         execution_history: list[ToolExecution] = []
 
@@ -570,7 +740,7 @@ class ChatSession(BaseAPI):
                 )
                 if kind == "response"
             )
-            calls = parse_tool_calls(response)
+            calls = parse_tool_calls(response, known_names=known_names)
             if not calls:
                 return ToolResponse(
                     content=response,

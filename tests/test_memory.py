@@ -11,8 +11,18 @@ class MemoryStoreTests(unittest.TestCase):
         self.directory = TemporaryDirectory()
         self.path = Path(self.directory.name) / "memory.db"
         self.memory = MemoryStore(self.path, namespace="project-a")
+        self.stores = [self.memory]
+
+    def open_store(self, namespace="project-a"):
+        """Open an extra store that is closed before the directory is removed."""
+
+        store = MemoryStore(self.path, namespace=namespace)
+        self.stores.append(store)
+        return store
 
     def tearDown(self):
+        for store in self.stores:
+            store.close()
         self.directory.cleanup()
 
     def test_remember_recall_and_forget(self):
@@ -30,12 +40,12 @@ class MemoryStoreTests(unittest.TestCase):
 
     def test_memories_persist_across_store_instances(self):
         stored = self.memory.remember("Persistent value")
-        reopened = MemoryStore(self.path, namespace="project-a")
+        reopened = self.open_store()
         self.assertEqual(reopened.get(stored["id"])["content"], "Persistent value")
 
     def test_namespaces_are_isolated(self):
         self.memory.remember("Only project A")
-        other = MemoryStore(self.path, namespace="project-b")
+        other = self.open_store("project-b")
         self.assertEqual(other.list(), [])
 
     def test_session_transcript_can_resume(self):
@@ -44,7 +54,7 @@ class MemoryStoreTests(unittest.TestCase):
         self.memory.add_turn(session_id, "assistant", "The API is ready")
         self.memory.checkpoint(session_id, "API implementation completed")
 
-        reopened = MemoryStore(self.path, namespace="project-a")
+        reopened = self.open_store()
         context = reopened.session_context(session_id)
         self.assertIn("API implementation completed", context)
         self.assertIn("Build the API", context)
@@ -75,27 +85,28 @@ class MemoryStoreTests(unittest.TestCase):
 
     def test_client_memory_context_priority_load(self):
         from deepwrap.client import Client
-        
-        # Write some memories
+
         self.memory.remember("Low priority", importance=0.5)
         self.memory.remember("High priority 1", importance=0.9)
         self.memory.remember("High priority 2", importance=0.95)
-        
-        client = Client(api_key="test-key", memory_path=self.path, memory_namespace="project-a")
-        session_id = client.memory.create_session("expert")
-        
-        # 1. First load of a session
-        context = client.memory_context("query", session_id)
-        self.assertIn("[PRIORITY MEMORIES]", context)
-        self.assertIn("High priority 1", context)
-        self.assertIn("High priority 2", context)
-        self.assertNotIn("Low priority", context)
-        
-        # 2. Second load of the same session -> should not load priority memories again
-        context2 = client.memory_context("query", session_id)
-        self.assertNotIn("[PRIORITY MEMORIES]", context2)
 
+        with Client(
+            api_key="test-key",
+            memory_path=self.path,
+            memory_namespace="project-a",
+        ) as client:
+            session_id = client.memory.create_session("expert")
 
+            # The first context load of a session carries the priority memories.
+            context = client.memory_context("query", session_id)
+            self.assertIn("[PRIORITY MEMORIES]", context)
+            self.assertIn("High priority 1", context)
+            self.assertIn("High priority 2", context)
+            self.assertNotIn("Low priority", context)
+
+            # Later loads of the same session must not repeat them.
+            repeated = client.memory_context("query", session_id)
+            self.assertNotIn("[PRIORITY MEMORIES]", repeated)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ client = Client(
     api_key=BEARER_TOKEN,
     working_directory=Path(__file__).resolve().parents[1],
     command_timeout=30,
-    max_agent_rounds=8,
+    max_agent_rounds=None,
 )
 chat = client.chats.create_session(model="expert")
 

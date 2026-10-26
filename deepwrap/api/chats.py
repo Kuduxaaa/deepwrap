@@ -61,7 +61,7 @@ class ChatsAPI(BaseAPI):
                 Optional model override for the new session.
             
             god_mode:
-                Whether to enable god mode for this session.
+                Whether to enable direct answer mode for this session.
 
         Returns:
             A `ChatSession` object bound to the created server-side session.

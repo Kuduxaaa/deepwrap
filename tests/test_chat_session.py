@@ -6,7 +6,12 @@ from unittest.mock import Mock
 
 from deepwrap.api.chat_session import ChatSession
 from deepwrap.api.files import FilesAPI
-from deepwrap.function_calling import Tool, parse_tool_calls
+from deepwrap.function_calling import (
+    Tool,
+    looks_like_tool_call,
+    parse_tool_calls,
+    strip_tool_markup,
+)
 
 
 class FakeResponse:
@@ -261,6 +266,80 @@ class FunctionProtocolTests(unittest.TestCase):
             parse_tool_calls(
                 '<deepwrap_tool_call>{"name":"weather","arguments":[]}</deepwrap_tool_call>'
             )
+
+    def test_parser_accepts_native_dsml_markup(self):
+        calls = parse_tool_calls(
+            '<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="exec"> '
+            '<｜｜DSML｜｜ parameter name="arguments" string="false">'
+            '{"command": "pwd"}</｜｜DSML｜｜ parameter> '
+            '</｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>'
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].name, "exec")
+        self.assertEqual(calls[0].arguments, {"command": "pwd"})
+
+    def test_parser_accepts_markup_with_named_parameters(self):
+        calls = parse_tool_calls(
+            '<DSML:invoke name="write_file">'
+            '<DSML:parameter name="path">note.txt</DSML:parameter>'
+            '<DSML:parameter name="content">hello</DSML:parameter>'
+            '</DSML:invoke>'
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].name, "write_file")
+        self.assertEqual(
+            calls[0].arguments, {"path": "note.txt", "content": "hello"}
+        )
+
+    def test_parser_accepts_fenced_json_fallback(self):
+        calls = parse_tool_calls(
+            '```json\n{"name": "exec", "arguments": {"command": "ls"}}\n```',
+            known_names=["exec"],
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].arguments, {"command": "ls"})
+
+    def test_parser_ignores_json_discussed_inside_prose(self):
+        calls = parse_tool_calls(
+            'A tool call looks like this:\n'
+            '```json\n{"name": "exec", "arguments": {"command": "ls"}}\n```\n'
+            'Do you want me to run it?',
+            known_names=["exec"],
+        )
+        self.assertEqual(calls, ())
+
+    def test_parser_ignores_unknown_names_in_json_fallback(self):
+        calls = parse_tool_calls(
+            '{"name": "launch_missiles", "arguments": {}}',
+            known_names=["exec"],
+        )
+        self.assertEqual(calls, ())
+
+    def test_parser_skips_malformed_native_markup_without_raising(self):
+        calls = parse_tool_calls(
+            '<｜｜DSML｜｜ invoke name="exec">'
+            '<｜｜DSML｜｜ parameter name="arguments" string="false">'
+            '{not json</｜｜DSML｜｜ parameter>'
+            '</｜｜DSML｜｜ invoke>'
+        )
+        self.assertEqual(calls, ())
+
+    def test_markup_detection_covers_native_formats(self):
+        self.assertTrue(looks_like_tool_call('<deepwrap_tool_call>{}'))
+        self.assertTrue(looks_like_tool_call('<｜｜DSML｜｜ invoke name="exec">'))
+        self.assertFalse(
+            looks_like_tool_call("I will invoke the exec tool to list files.")
+        )
+
+    def test_strip_tool_markup_removes_leaked_envelopes(self):
+        cleaned = strip_tool_markup(
+            'Done.\n<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="exec"> '
+            '<｜｜DSML｜｜ parameter name="arguments" string="false">'
+            '{"command": "pwd"}</｜｜DSML｜｜ parameter> '
+            '</｜｜DSML｜｜ invoke> </｜｜DSML｜｜ calls>'
+        )
+        self.assertEqual(cleaned, "Done.")
+        self.assertNotIn("DSML", cleaned)
 
 
 if __name__ == "__main__":
