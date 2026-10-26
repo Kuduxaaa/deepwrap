@@ -48,6 +48,19 @@ class MarkdownStreamRendererTests(unittest.TestCase):
         renderer.finish()
         self.assertIn("item 199", output.getvalue())
 
+    def test_finish_can_close_a_block_mid_stream(self):
+        renderer, output = self.make_renderer()
+        renderer.feed("Let me look at the parser.")
+        renderer.finish()
+
+        self.assertIn("Let me look at the parser.", output.getvalue())
+
+        renderer.feed("The parser was fine.")
+        renderer.finish()
+        rendered = output.getvalue()
+        self.assertIn("The parser was fine.", rendered)
+        self.assertNotIn("parser.The", rendered)
+
     def test_finish_renders_trailing_block_without_blank_line(self):
         renderer, output = self.make_renderer()
         renderer.feed("### Result\nEverything completed.")

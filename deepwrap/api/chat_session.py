@@ -35,11 +35,14 @@ ChunkKind = Literal["think", "response"]
 # enough, and a short prefix is what keeps the CLI feeling live.
 AGENT_STREAM_DECISION_CHARS = 1024
 
-# Identical tool calls tolerated before the model is told it is looping.
+# Consecutive identical tool calls tolerated before the model is told it is
+# looping. Only consecutive rounds count: polling job_status with the same job
+# id between other work is normal progress, not a loop.
 AGENT_REPEAT_LIMIT = 3
 
-# Identical tool calls tolerated before the agent is made to answer. Rounds are
-# unlimited by default, so a model stuck on one call still has to terminate.
+# Consecutive identical tool calls tolerated before the agent is made to answer.
+# Rounds are unlimited by default, so a model stuck on one call still has to
+# terminate.
 AGENT_STUCK_LIMIT = 6
 
 # Attempts at talking a model out of an unparseable tool-call syntax before its
@@ -521,7 +524,8 @@ class ChatSession(BaseAPI):
             force_final = False
             stuck = False
             recoveries = 0
-            repeats: dict[str, int] = {}
+            last_signature: str | None = None
+            repeats = 0
 
             while True:
                 limit = self._client.max_agent_rounds
@@ -628,7 +632,8 @@ class ChatSession(BaseAPI):
                     sort_keys=True,
                     default=str,
                 )
-                repeats[signature] = repeats.get(signature, 0) + 1
+                repeats = repeats + 1 if signature == last_signature else 1
+                last_signature = signature
 
                 result_messages: list[str] = []
                 for call in calls:
@@ -666,11 +671,9 @@ class ChatSession(BaseAPI):
                     )
                     result_messages.append(build_tool_result(call, output))
 
-                if repeats[signature] >= AGENT_REPEAT_LIMIT:
-                    result_messages.append(
-                        build_loop_warning(calls[0], repeats[signature])
-                    )
-                if repeats[signature] >= AGENT_STUCK_LIMIT:
+                if repeats >= AGENT_REPEAT_LIMIT:
+                    result_messages.append(build_loop_warning(calls[0], repeats))
+                if repeats >= AGENT_STUCK_LIMIT:
                     stuck = True
                 if round_index % AGENT_RECAP_INTERVAL == 0:
                     plan = getattr(self._client, "plan", None)

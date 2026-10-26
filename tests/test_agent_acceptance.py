@@ -396,5 +396,52 @@ class AgentAcceptanceTests(unittest.TestCase):
         self.assertIn("recap", [event.type for event in response.events])
 
 
+    def test_24_repeats_separated_by_other_work_are_not_a_loop(self):
+        self.client.max_agent_rounds = None
+        rounds = []
+
+        def polling(prompt, **kwargs):
+            rounds.append(prompt)
+            if len(rounds) > 12:
+                yield "response", "The job finished."
+            elif len(rounds) % 2:
+                # Polling the same job between real work is normal progress.
+                yield "response", tool_call("list_jobs", {})
+            else:
+                yield "response", tool_call(
+                    "exec_code", {"code": f"print({len(rounds)})"}
+                )
+
+        self.chat.respond_structured = polling
+        response = self.chat.respond("watch the job", stream=False)
+
+        self.assertEqual(response, "The job finished.")
+        self.assertEqual(len(response.tools_used), 12)
+        self.assertNotIn(
+            "limit_reached", [event.type for event in response.events]
+        )
+
+    def test_25_only_consecutive_repeats_trigger_the_loop_warning(self):
+        self.client.max_agent_rounds = None
+        prompts = []
+
+        def alternating(prompt, **kwargs):
+            prompts.append(prompt)
+            if len(prompts) > 8:
+                yield "response", "done"
+            elif len(prompts) % 2:
+                yield "response", tool_call("list_jobs", {})
+            else:
+                yield "response", tool_call("get_plan", {})
+
+        self.chat.respond_structured = alternating
+        self.chat.respond("alternate", stream=False)
+
+        self.assertFalse(
+            any("same tool call" in prompt.lower() for prompt in prompts),
+            "alternating calls must not be reported as a loop",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

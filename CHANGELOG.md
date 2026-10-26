@@ -5,6 +5,22 @@ All notable changes to DeepWrap are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Loop detection counted every identical tool call in the session instead of
+  consecutive ones, so six `job_status` polls spread across real work stopped
+  the agent and forced an early answer.
+- `start_job` passed the command straight to the OS instead of to the resolved
+  shell, so a background `echo a && echo b` ran as `echo "a && echo b"` and
+  reported success with wrong output.
+- `shell="powershell"` ran commands through `cmd.exe` on Windows, because the
+  resolved executable was never actually invoked. Each shell family now gets
+  its own argument vector.
+- CLI narration streamed before a tool call is now closed as its own Markdown
+  block, instead of merging into the final answer that arrives rounds later.
+
 ## [0.3.0] - 2026-10-26
 
 ### Added

@@ -56,7 +56,12 @@ class NativeTools:
         self.timeout = timeout
         self.output_budget = max(1_000, int(output_budget))
         self.shell = self._resolve_shell(shell)
-        self.shell_is_posix = Path(self.shell).stem.lower() not in {"cmd", "powershell", "pwsh"}
+        self.shell_is_posix = Path(self.shell).stem.lower() not in {
+            "cmd",
+            "command",
+            "powershell",
+            "pwsh",
+        }
         self._jobs_directory = Path(tempfile.mkdtemp(prefix="deepwrap-jobs-"))
         self._outputs_directory = self._jobs_directory / "outputs"
         self._jobs: dict[str, dict[str, Any]] = {}
@@ -84,19 +89,28 @@ class NativeTools:
                 return candidate
         return os.environ.get("COMSPEC") or "cmd.exe"
 
+    def _argv(self, command: str) -> list[str]:
+        """Build the argument vector that runs a command in the chosen shell.
+
+        Every family needs its own invocation. Relying on `shell=True` instead
+        would hand the command to COMSPEC on Windows, which silently ignores a
+        requested PowerShell, and would mangle a command passed as a bare
+        string with `shell=False`.
+        """
+
+        family = Path(self.shell).stem.lower()
+        if family in {"powershell", "pwsh"}:
+            return [self.shell, "-NoProfile", "-Command", command]
+        if family == "cmd":
+            return [self.shell, "/d", "/s", "/c", command]
+        return [self.shell, "-c", command]
+
     def _run(self, command: str, timeout: float | None) -> subprocess.CompletedProcess:
         """Run a shell command through the resolved shell."""
 
-        if self.shell_is_posix:
-            argv: list[str] | str = [self.shell, "-c", command]
-            use_shell = False
-        else:
-            argv = command
-            use_shell = True
         return subprocess.run(
-            argv,
+            self._argv(command),
             cwd=self.working_directory,
-            shell=use_shell,
             capture_output=True,
             text=True,
             timeout=timeout or self.timeout,
@@ -246,7 +260,6 @@ class NativeTools:
         stderr_handle = stderr_path.open("wb")
         popen_kwargs: dict[str, Any] = {
             "cwd": cwd,
-            "shell": not self.shell_is_posix,
             "stdout": stdout_handle,
             "stderr": stderr_handle,
             "stdin": subprocess.DEVNULL,
@@ -256,7 +269,7 @@ class NativeTools:
         else:
             popen_kwargs["start_new_session"] = True
         try:
-            process = subprocess.Popen(command, **popen_kwargs)
+            process = subprocess.Popen(self._argv(command), **popen_kwargs)
         finally:
             stdout_handle.close()
             stderr_handle.close()

@@ -948,6 +948,7 @@ class DeepWrapCLI:
             if self.config.agent_mode:
                 spinner_stopped = False
                 thinking_view = ThinkingView(self.console)
+                markdown = MarkdownStreamRenderer(self.console)
 
                 def show_agent_event(event):
                     nonlocal spinner_stopped
@@ -981,6 +982,10 @@ class DeepWrapCLI:
                     if event.type == "tool_started":
                         ensure_spinner_stopped()
                         ensure_thinking_finished()
+                        # A turn may stream narration and only then call a tool.
+                        # Closing the Markdown block keeps that narration from
+                        # merging into the answer that arrives rounds later.
+                        markdown.finish()
                         self.console.print(
                             Text(f"  → {detail}", style="dim #93c5fd")
                         )
@@ -1030,7 +1035,6 @@ class DeepWrapCLI:
                             )
                         )
 
-                markdown = MarkdownStreamRenderer(self.console)
                 for chunk in self.chat.respond(
                     prompt,
                     thinking=self.config.show_thinking,

@@ -448,7 +448,9 @@ unfinished, and the round limit is announced through a `limit_reached` event.
 
 A model that issues the same call with the same arguments three times in a row
 is told it is looping and asked to change approach or answer. After six, it is
-made to answer, so an unlimited loop still terminates without `Ctrl+C`.
+made to answer, so an unlimited loop still terminates without `Ctrl+C`. Only
+consecutive rounds count: polling `job_status` with the same job id between
+other work is progress, not a loop.
 
 #### Context budget
 
@@ -501,6 +503,15 @@ shell when one exists, including Git Bash on Windows, and never picks the WSL
 `bash` in `System32`, which would run in a different filesystem.
 
 Set `shell=` on the client or `DEEPWRAP_SHELL` in the environment to force one.
+Each family is invoked the way it expects, so `cmd.exe`, `powershell`, `pwsh`,
+and any POSIX shell all run the command they were given:
+
+| Shell              | Invocation                      |
+| ------------------ | ------------------------------- |
+| POSIX (bash, zsh…) | `<shell> -c "<command>"`        |
+| PowerShell, pwsh   | `<shell> -NoProfile -Command …` |
+| cmd.exe            | `<shell> /d /s /c "<command>"`  |
+
 The resolved shell and its command syntax are declared to the model, together
 with the OS, working directory, and output budget.
 
@@ -517,6 +528,14 @@ those forms as well, so the call is executed rather than printed as raw text, an
 markup never reaches the user's screen mid-stream. Markup that cannot be parsed
 at all is reported back to the model with the correct syntax, and the turn is
 retried instead of being shown as the answer.
+
+One trade-off stays: a turn is streamed once 1024 characters have arrived with no
+tool markup in them, and a model that narrates that long before calling a tool
+has already had its narration shown. The markup itself is still withheld, and the
+narration is closed off as its own block before the tool output, so it cannot
+merge into the answer that arrives rounds later. Streaming earlier means more
+exposure, streaming later means a less live terminal; this is where the line is
+drawn.
 
 #### Prompt cost
 

@@ -206,5 +206,53 @@ class OutputBudgetTests(unittest.TestCase):
         self.assertNotIn("system32", resolved.lower())
 
 
+class ShellSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = TemporaryDirectory()
+        self.root = self.directory.name
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_posix_shell_runs_commands_through_itself(self):
+        tools = NativeTools(self.root, shell="bash")
+
+        self.assertEqual(tools._argv("echo hi")[1:], ["-c", "echo hi"])
+
+    def test_powershell_is_not_handed_to_cmd(self):
+        tools = NativeTools(self.root, shell="powershell")
+        argv = tools._argv("Get-Location")
+
+        self.assertIn("powershell", argv[0].lower())
+        self.assertEqual(argv[1:], ["-NoProfile", "-Command", "Get-Location"])
+        self.assertFalse(tools.shell_is_posix)
+
+    def test_cmd_gets_its_own_invocation(self):
+        tools = NativeTools(self.root, shell="cmd.exe")
+        argv = tools._argv("echo hi")
+
+        self.assertIn("cmd", argv[0].lower())
+        self.assertEqual(argv[1:], ["/d", "/s", "/c", "echo hi"])
+
+    def test_shell_operators_work_in_a_foreground_command(self):
+        tools = NativeTools(self.root, timeout=20)
+        result = tools.exec("echo first && echo second")
+
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["stdout"].split(), ["first", "second"])
+
+    def test_shell_operators_work_in_a_background_job(self):
+        tools = NativeTools(self.root, timeout=20)
+        job = tools.start_job("echo first && echo second")
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if tools.job_status(job["id"])["state"] != "running":
+                break
+            time.sleep(0.2)
+
+        output = tools.job_output(job["id"])["content"]
+        self.assertEqual(output.split(), ["first", "second"])
+
+
 if __name__ == "__main__":
     unittest.main()
